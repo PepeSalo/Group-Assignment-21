@@ -1,0 +1,95 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}Home - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="text-center mt-3 mb-3">
+    <h1>Welcome to RecipeDB</h1>
+    <p class="mt-2" style="font-size: 1.2rem; color: var(--text-secondary);">
+        Your comprehensive recipe database with OCR support
+    </p>
+</div>
+
+{% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+<!-- Statistics -->
+<div class="row mb-3">
+    <div class="col-md-4">
+        <div class="card text-center">
+            <div class="card-header">Total Recipes</div>
+            <div style="font-size: 2rem; font-weight: bold; padding: 1rem;">{{ total_recipes|default:0 }}</div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card text-center">
+            <div class="card-header">Total Authors</div>
+            <div style="font-size: 2rem; font-weight: bold; padding: 1rem;">{{ total_authors|default:0 }}</div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card text-center">
+            <div class="card-header">Total Genres</div>
+            <div style="font-size: 2rem; font-weight: bold; padding: 1rem;">{{ total_genres|default:0 }}</div>
+        </div>
+    </div>
+</div>
+
+<!-- Call to Action -->
+<div class="card mb-3">
+    <div class="card-header">Get Started</div>
+    <div style="padding: 1rem;">
+        <p>RecipeDB allows you to:</p>
+        <ul style="margin-left: 2rem; line-height: 2;">
+            <li>Browse and search through a comprehensive recipe database</li>
+            <li>Upload images using OCR (Optical Character Recognition) to automatically extract recipe data</li>
+            <li>Rate recipes and keep personal notes</li>
+            <li>Search by ingredients, authors, genres, and ratings</li>
+            <li>Manage your own recipe collection</li>
+        </ul>
+        <div class="mt-3">
+            {% if user.is_authenticated %}
+                <a href="{% url 'recipe_list' %}" class="btn btn-primary">Browse Recipes</a>
+                <a href="{% url 'recipe_create' %}" class="btn btn-secondary">Add New Recipe</a>
+                <a href="{% url 'ocr_upload' %}" class="btn btn-secondary">Upload via OCR</a>
+            {% else %}
+                <a href="{% url 'signup' %}" class="btn btn-primary">Sign Up</a>
+                <a href="{% url 'login' %}" class="btn btn-secondary">Login</a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Recent Recipes -->
+{% if recent_recipes %}
+<div class="card">
+    <div class="card-header">Recently Added Recipes</div>
+    <div style="padding: 1rem;">
+        <div class="row">
+            {% for recipe in recent_recipes %}
+            <div class="col-md-4">
+                <div class="card mb-2">
+                    {% if recipe.image %}
+                        <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px 8px 0 0;">
+                    {% endif %}
+                    <div style="padding: 1rem;">
+                        <h3 style="font-size: 1.1rem; margin-bottom: 0.5rem;">
+                            <a href="{% url 'recipe_detail' recipe.pk %}">{{ recipe.title }}</a>
+                        </h3>
+                        <p style="color: var(--text-muted); font-size: 0.9rem;">
+                            {% for author in recipe.authors.all %}
+                                {{ author.get_full_name }}{% if not forloop.last %}, {% endif %}
+                            {% empty %}
+                                Unknown Author
+                            {% endfor %}
+                        </p>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

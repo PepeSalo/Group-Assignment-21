@@ -1,0 +1,120 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}{% if object %}Edit{% else %}Create{% endif %} Recipe - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="mt-3 mb-3">
+    <h1>{% if object %}Edit{% else %}Create New{% endif %} Recipe</h1>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">Recipe Details</div>
+            <div style="padding: 2rem;">
+                <form method="post" enctype="multipart/form-data">
+                    {% csrf_token %}
+                    
+                    <div class="form-group">
+                        <label for="{{ form.title.id_for_label }}">Title *</label>
+                        {{ form.title }}
+                        {% if form.title.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.title.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.authors_text.id_for_label }}">Authors</label>
+                        {{ form.authors_text }}
+                        <small style="color: var(--text-muted);">{{ form.authors_text.help_text }}</small>
+                        {% if form.authors_text.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.authors_text.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.genres_text.id_for_label }}">Genres</label>
+                        {{ form.genres_text }}
+                        <small style="color: var(--text-muted);">{{ form.genres_text.help_text }}</small>
+                        {% if form.genres_text.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.genres_text.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.ingredients_text.id_for_label }}">Ingredients</label>
+                        {{ form.ingredients_text }}
+                        <small style="color: var(--text-muted);">
+                            {{ form.ingredients_text.help_text }}
+                        </small>
+                        {% if form.ingredients_text.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.ingredients_text.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.instructions.id_for_label }}">Instructions *</label>
+                        {{ form.instructions }}
+                        {% if form.instructions.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.instructions.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.source_url.id_for_label }}">Source URL</label>
+                        {{ form.source_url }}
+                        <small style="color: var(--text-muted);">{{ form.source_url.help_text }}</small>
+                        {% if form.source_url.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.source_url.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.image.id_for_label }}">Recipe Image</label>
+                        {{ form.image }}
+                        {% if form.image.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.image.errors }}
+                            </div>
+                        {% endif %}
+                        {% if object.image %}
+                            <div class="mt-2">
+                                <p>Current image:</p>
+                                <img src="{{ object.image.url }}" alt="{{ object.title }}" style="max-width: 200px; border-radius: 4px;">
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="mt-3">
+                        <button type="submit" class="btn btn-primary">
+                            {% if object %}Update{% else %}Create{% endif %} Recipe
+                        </button>
+                        <a href="{% if object %}{% url 'recipe_detail' object.pk %}{% else %}{% url 'recipe_list' %}{% endif %}" class="btn btn-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        {% if object %}
+        <div class="card mt-3">
+            <div class="card-header">Tip</div>
+            <div style="padding: 1rem;">
+                <p>Edit the ingredients above — one per line. Use the format <strong>quantity - name</strong> (e.g., "2 cups - flour"). Add notes in parentheses: "1 cup - onion (diced)".</p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

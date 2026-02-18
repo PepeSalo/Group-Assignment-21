@@ -1,0 +1,44 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}Login - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-6" style="margin: 0 auto;">
+        <div class="card mt-3">
+            <div class="card-header text-center">Login to Your Account</div>
+            <div style="padding: 2rem;">
+                <form method="post">
+                    {% csrf_token %}
+                    
+                    <div class="form-group">
+                        <label for="{{ form.username.id_for_label }}">Username</label>
+                        {{ form.username }}
+                        {% if form.username.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.username.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group">
+                        <label for="{{ form.password.id_for_label }}">Password</label>
+                        {{ form.password }}
+                        {% if form.password.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.password.errors }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">Login</button>
+                </form>
+
+                <div class="text-center mt-3">
+                    <p>Don't have an account? <a href="{% url 'signup' %}">Sign up here</a></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

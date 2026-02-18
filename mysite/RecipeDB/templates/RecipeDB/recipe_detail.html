@@ -1,0 +1,207 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}{{ recipe.title }} - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="mt-3 mb-3">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h1>{{ recipe.title }}</h1>
+        {% if user.is_authenticated %}
+            <div>
+                {% if user == recipe.created_by or perms.RecipeDB.change_recipe %}
+                    <a href="{% url 'recipe_update' recipe.pk %}" class="btn btn-secondary">Edit</a>
+                {% endif %}
+                {% if user == recipe.created_by or perms.RecipeDB.delete_recipe %}
+                    <a href="{% url 'recipe_delete' recipe.pk %}" class="btn btn-danger">Delete</a>
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+{% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="row">
+    <div class="col-md-8">
+        <!-- Recipe Image -->
+        {% if recipe.image %}
+        <div class="card mb-3">
+            <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" style="width: 100%; max-height: 400px; object-fit: cover; border-radius: 8px;">
+        </div>
+        {% endif %}
+
+        <!-- Authors and Metadata -->
+        <div class="card mb-3">
+            <div class="card-header">Recipe Information</div>
+            <div style="padding: 1rem;">
+                <p><strong>Authors:</strong> 
+                    {% for author in recipe.authors.all %}
+                        {{ author.get_full_name }}{% if not forloop.last %}, {% endif %}
+                    {% empty %}
+                        Unknown
+                    {% endfor %}
+                </p>
+                
+                {% if recipe.genres.all %}
+                <p><strong>Genres:</strong> 
+                    {% for genre in recipe.genres.all %}
+                        {{ genre.name }}{% if not forloop.last %}, {% endif %}
+                    {% endfor %}
+                </p>
+                {% endif %}
+                
+                <p><strong>Added:</strong> {{ recipe.created_at|date:"F d, Y" }}</p>
+                
+                {% if recipe.ocr_confidence %}
+                <p><strong>OCR Confidence:</strong> {{ recipe.ocr_confidence|floatformat:2 }}%</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Ingredients -->
+        <div class="card mb-3">
+            <div class="card-header">Ingredients</div>
+            <div style="padding: 1rem;">
+                {% if recipe_ingredients %}
+                    <ul style="list-style: none; padding: 0;">
+                        {% for ri in recipe_ingredients %}
+                        <li style="padding: 0.5rem 0; border-bottom: 1px solid var(--border-color);">
+                            <strong>{{ ri.quantity }}</strong> {{ ri.ingredient.name }}
+                            {% if ri.notes %}<em style="color: var(--text-muted);">({{ ri.notes }})</em>{% endif %}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p>No ingredients listed.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Instructions -->
+        <div class="card mb-3">
+            <div class="card-header">Instructions</div>
+            <div style="padding: 1rem; white-space: pre-wrap;">{{ recipe.instructions }}</div>
+        </div>
+
+        <!-- URLs -->
+        {% if recipe_urls %}
+        <div class="card mb-3">
+            <div class="card-header">Related URLs</div>
+            <div style="padding: 1rem;">
+                <ul style="list-style: none; padding: 0;">
+                    {% for url in recipe_urls %}
+                    <li style="padding: 0.5rem 0;">
+                        <a href="{{ url.url }}" target="_blank" rel="noopener">
+                            {% if url.description %}{{ url.description }}{% else %}{{ url.url }}{% endif %}
+                        </a>
+                        {% if url.is_primary %}<span style="color: var(--success);">(Primary)</span>{% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="col-md-4">
+        <!-- Ratings Summary -->
+        <div class="card mb-3">
+            <div class="card-header">Ratings</div>
+            <div style="padding: 1rem;">
+                {% if avg_published_rating %}
+                    <p><strong>Published Rating:</strong> 
+                        <span style="font-size: 1.5rem; color: var(--warning);">★</span>
+                        {{ avg_published_rating }}/5
+                    </p>
+                {% endif %}
+                
+                {% if avg_personal_rating %}
+                    <p><strong>Community Rating:</strong> 
+                        <span style="font-size: 1.5rem; color: var(--warning);">★</span>
+                        {{ avg_personal_rating }}/5
+                    </p>
+                {% endif %}
+                
+                {% if not avg_published_rating and not avg_personal_rating %}
+                    <p>No ratings yet.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- User's Rating -->
+        {% if user.is_authenticated %}
+        <div class="card mb-3">
+            <div class="card-header">Your Rating</div>
+            <div style="padding: 1rem;">
+                {% if user_rating %}
+                    <p><strong>Your Score:</strong> {{ user_rating.score }}/5</p>
+                    {% if user_rating.notes %}
+                        <p><strong>Your Notes:</strong></p>
+                        <p style="white-space: pre-wrap; font-size: 0.9rem;">{{ user_rating.notes }}</p>
+                    {% endif %}
+                    <hr>
+                    <p style="font-size: 0.9rem; color: var(--text-muted);">Update your rating:</p>
+                {% else %}
+                    <p>Rate this recipe:</p>
+                {% endif %}
+                
+                <form method="post" action="{% url 'rate_recipe' recipe.pk %}">
+                    {% csrf_token %}
+                    <div class="form-group">
+                        <label>Score (1-5)</label>
+                        {{ rating_form.score }}
+                    </div>
+                    <div class="form-group">
+                        <label>Notes</label>
+                        {{ rating_form.notes }}
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">
+                        {% if user_rating %}Update{% else %}Submit{% endif %} Rating
+                    </button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Published Ratings -->
+        {% if published_ratings %}
+        <div class="card mb-3">
+            <div class="card-header">Published Reviews</div>
+            <div style="padding: 1rem;">
+                {% for rating in published_ratings %}
+                <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);">
+                    <p><strong>{{ rating.source }}</strong> - {{ rating.score }}/5</p>
+                    {% if rating.review_text %}
+                        <p style="font-size: 0.9rem; color: var(--text-secondary);">{{ rating.review_text }}</p>
+                    {% endif %}
+                    {% if rating.source_url %}
+                        <a href="{{ rating.source_url }}" target="_blank" rel="noopener" style="font-size: 0.85rem;">Read full review</a>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Community Ratings -->
+        {% if personal_ratings %}
+        <div class="card">
+            <div class="card-header">Community Reviews ({{ personal_ratings.count }})</div>
+            <div style="padding: 1rem; max-height: 300px; overflow-y: auto;">
+                {% for rating in personal_ratings %}
+                <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);">
+                    <p><strong>{{ rating.user.username }}</strong> - {{ rating.score }}/5</p>
+                    {% if rating.notes %}
+                        <p style="font-size: 0.9rem; color: var(--text-secondary); white-space: pre-wrap;">{{ rating.notes }}</p>
+                    {% endif %}
+                    <p style="font-size: 0.8rem; color: var(--text-muted);">{{ rating.updated_at|date:"M d, Y" }}</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}Ingredients - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="mt-3 mb-3">
+    <h1>Recipe Ingredients</h1>
+</div>
+
+<div class="card">
+    <div class="card-header">All Ingredients ({{ page_obj.paginator.count }})</div>
+    <div style="padding: 1rem;">
+        <div style="columns: 3; column-gap: 2rem;">
+            {% for ingredient in ingredients %}
+            <div style="break-inside: avoid; margin-bottom: 0.5rem;">
+                <p>
+                    <strong>{{ ingredient.name }}</strong>
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">
+                        ({{ ingredient.recipes.count }} recipe{{ ingredient.recipes.count|pluralize }})
+                    </span>
+                </p>
+            </div>
+            {% empty %}
+            <p>No ingredients found.</p>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Pagination -->
+{% if page_obj.paginator.num_pages > 1 %}
+<nav>
+    <ul class="pagination">
+        {% if page_obj.has_previous %}
+            <li><a href="?page=1">&laquo; First</a></li>
+            <li><a href="?page={{ page_obj.previous_page_number }}">&lsaquo; Prev</a></li>
+        {% endif %}
+        <li><span class="current">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span></li>
+        {% if page_obj.has_next %}
+            <li><a href="?page={{ page_obj.next_page_number }}">Next &rsaquo;</a></li>
+            <li><a href="?page={{ page_obj.paginator.num_pages }}">Last &raquo;</a></li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}
+
+<style>
+    @media (max-width: 768px) {
+        .card div[style*="columns"] {
+            columns: 1 !important;
+        }
+    }
+</style>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}Genres - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="mt-3 mb-3">
+    <h1>Recipe Genres</h1>
+</div>
+
+<div class="card">
+    <div class="card-header">All Genres ({{ page_obj.paginator.count }})</div>
+    <div style="padding: 1rem;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem;">
+            {% for genre in genres %}
+            <div class="card">
+                <div style="padding: 1rem;">
+                    <h3 style="font-size: 1.1rem; margin-bottom: 0.5rem;">{{ genre.name }}</h3>
+                    <p style="color: var(--text-muted); font-size: 0.9rem;">
+                        {{ genre.recipes.count }} recipe{{ genre.recipes.count|pluralize }}
+                    </p>
+                    {% if genre.description %}
+                        <p style="font-size: 0.85rem; margin-top: 0.5rem; color: var(--text-secondary);">
+                            {{ genre.description|truncatewords:15 }}
+                        </p>
+                    {% endif %}
+                </div>
+            </div>
+            {% empty %}
+            <p>No genres found.</p>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Pagination -->
+{% if page_obj.paginator.num_pages > 1 %}
+<nav>
+    <ul class="pagination">
+        {% if page_obj.has_previous %}
+            <li><a href="?page=1">&laquo; First</a></li>
+            <li><a href="?page={{ page_obj.previous_page_number }}">&lsaquo; Prev</a></li>
+        {% endif %}
+        <li><span class="current">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span></li>
+        {% if page_obj.has_next %}
+            <li><a href="?page={{ page_obj.next_page_number }}">Next &rsaquo;</a></li>
+            <li><a href="?page={{ page_obj.paginator.num_pages }}">Last &raquo;</a></li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}
