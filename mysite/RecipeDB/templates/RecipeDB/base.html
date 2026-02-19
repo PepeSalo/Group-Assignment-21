@@ -406,7 +406,7 @@
     <nav class="navbar">
         <div class="container navbar-content">
             <a href="{% url 'home' %}" class="navbar-brand">🍳 RecipeDB</a>
-            <ul class="navbar-nav">
+            {% spaceless %}<ul class="navbar-nav">
                 <li><a href="{% url 'home' %}">Home</a></li>
                 <li><a href="{% url 'recipe_list' %}">Browse Recipes</a></li>
                 {% if user.is_authenticated %}
@@ -418,7 +418,7 @@
                     <li><a href="{% url 'signup' %}">Sign Up</a></li>
                 {% endif %}
                 <li><button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">🌓</button></li>
-            </ul>
+            </ul>{% endspaceless %}
         </div>
     </nav>
 

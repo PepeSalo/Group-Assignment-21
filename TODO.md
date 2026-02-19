@@ -84,6 +84,7 @@
 ### Testing
 - [x] ~~Increase test coverage with URL scraping, merge, and OCR URL detection tests (235 tests)~~
 - [x] ~~Added noise filtering tests, site detection tests, slug generation tests (284 tests)~~
+- [x] ~~Verified 284 tests pass after inline CSS refactoring~~
 - [ ] Increase test coverage to >90%
 - [ ] Add integration tests for OCR workflow
 - [ ] Implement end-to-end testing with Selenium
@@ -122,6 +123,7 @@
 - [ ] Implement recipe difficulty assessment
 
 ### UI/UX Improvements
+- [x] ~~Inline CSS cleanup: moved all inline `style=` attributes to CSS classes in `{% block extra_css %}` style blocks (recipe_detail, recipe_merge_confirm, ocr_upload)~~
 - [ ] Add recipe print-friendly view
 - [ ] Implement voice-controlled recipe reading
 - [ ] Create interactive cooking mode
@@ -223,7 +225,8 @@
 - ✅ beautifulsoup4 dependency added for HTML parsing
 - ✅ OCRUploadForm: supports URL-only, image-only, or both
 - ✅ recipe_merge_confirm view with session-based conflict storage
-- ✅ 235 comprehensive tests (up from 115)
+- ✅ 284 comprehensive tests (up from 115)
+- ✅ Inline CSS cleanup: all templates use CSS classes instead of inline `style=` attributes
 
 ## Notes
 
@@ -235,4 +238,4 @@
 
 ---
 
-Last Updated: February 19, 2026
+Last Updated: February 20, 2026

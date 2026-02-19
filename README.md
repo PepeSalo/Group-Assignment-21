@@ -80,6 +80,7 @@ RecipeDB is a comprehensive web application built with Django 6.0.2 that allows 
 - **Dark/Light Mode**: Automatic theme switching based on system preferences with manual toggle
 - **WCAG 2.1 AA Compliant**: High contrast colors for accessibility in both themes
 - **Intuitive Navigation**: Clean and modern interface
+- **No Inline CSS**: All styles use CSS classes defined in per-page `<style>` blocks via `{% block extra_css %}`, keeping templates clean and maintainable
 
 ### Admin Interface
 - **Comprehensive Django Admin**: Full-featured admin panel for managing all models
@@ -311,7 +312,7 @@ Test coverage includes:
 - **Web Scraping**: JSON-LD (schema.org), Open Graph, meta tags, regex fallback
 - **Web Search**: DuckDuckGo Instant Answer API (no API key required)
 - **Frontend**: Responsive HTML5/CSS3 with vanilla JavaScript
-- **Design**: Custom CSS with CSS variables for theming (light/dark mode)
+- **Design**: Custom CSS with CSS variables for theming (light/dark mode), per-page `{% block extra_css %}` style blocks (no inline styles)
 
 ## Accessibility
 

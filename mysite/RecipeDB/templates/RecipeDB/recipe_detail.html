@@ -2,9 +2,34 @@
 
 {% block title %}{{ recipe.title }} - RecipeDB{% endblock %}
 
+{% block extra_css %}
+<style>
+    .detail-header { display: flex; justify-content: space-between; align-items: center; }
+    .recipe-image { width: 100%; max-height: 400px; object-fit: cover; border-radius: 8px; }
+    .card-body { padding: 1rem; }
+    .card-body-scroll { padding: 1rem; max-height: 300px; overflow-y: auto; }
+    .link-break { word-break: break-all; }
+    .list-plain { list-style: none; padding: 0; }
+    .ingredient-item { padding: 0.5rem 0; border-bottom: 1px solid var(--border-color); }
+    .text-muted-em { color: var(--text-muted); }
+    .text-secondary-sm { font-size: 0.9rem; color: var(--text-secondary); }
+    .text-muted-sm { font-size: 0.9rem; color: var(--text-muted); }
+    .text-muted-xs { font-size: 0.8rem; color: var(--text-muted); }
+    .text-success { color: var(--success); }
+    .instructions-body { padding: 1rem; white-space: pre-wrap; }
+    .url-item { padding: 0.5rem 0; }
+    .rating-star { font-size: 1.5rem; color: var(--warning); }
+    .btn-full { width: 100%; }
+    .notes-text { white-space: pre-wrap; font-size: 0.9rem; }
+    .review-item { margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color); }
+    .review-link { font-size: 0.85rem; }
+    .text-secondary-prewrap { font-size: 0.9rem; color: var(--text-secondary); white-space: pre-wrap; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="mt-3 mb-3">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
+    <div class="detail-header">
         <h1>{{ recipe.title }}</h1>
         {% if user.is_authenticated %}
             <div>
@@ -30,10 +55,10 @@
         <div class="card mb-3">
             {% if primary_source_url %}
             <a href="{{ primary_source_url }}" target="_blank" rel="noopener" title="View original recipe at {{ primary_source_url }}">
-                <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" style="width: 100%; max-height: 400px; object-fit: cover; border-radius: 8px;">
+                <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" class="recipe-image">
             </a>
             {% else %}
-            <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" style="width: 100%; max-height: 400px; object-fit: cover; border-radius: 8px;">
+            <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" class="recipe-image">
             {% endif %}
         </div>
         {% endif %}
@@ -41,10 +66,10 @@
         <!-- Authors and Metadata -->
         <div class="card mb-3">
             <div class="card-header">Recipe Information</div>
-            <div style="padding: 1rem;">
+            <div class="card-body">
                 {% if primary_source_url %}
                 <p><strong>Source:</strong>
-                    <a href="{{ primary_source_url }}" target="_blank" rel="noopener" style="word-break: break-all;">
+                    <a href="{{ primary_source_url }}" target="_blank" rel="noopener" class="link-break">
                         {{ primary_source_url }}
                     </a>
                 </p>
@@ -77,16 +102,16 @@
         <!-- Ingredients -->
         <div class="card mb-3">
             <div class="card-header">Ingredients</div>
-            <div style="padding: 1rem;">
+            <div class="card-body">
                 {% if recipe_ingredients %}
-                    <ul style="list-style: none; padding: 0;">
+                    {% spaceless %}<ul class="list-plain">
                         {% for ri in recipe_ingredients %}
-                        <li style="padding: 0.5rem 0; border-bottom: 1px solid var(--border-color);">
+                        <li class="ingredient-item">
                             <strong>{{ ri.quantity }}</strong> {{ ri.ingredient.name }}
-                            {% if ri.notes %}<em style="color: var(--text-muted);">({{ ri.notes }})</em>{% endif %}
+                            {% if ri.notes %}<em class="text-muted-em">({{ ri.notes }})</em>{% endif %}
                         </li>
                         {% endfor %}
-                    </ul>
+                    </ul>{% endspaceless %}
                 {% else %}
                     <p>No ingredients listed.</p>
                 {% endif %}
@@ -96,25 +121,25 @@
         <!-- Instructions -->
         <div class="card mb-3">
             <div class="card-header">Instructions</div>
-            <div style="padding: 1rem; white-space: pre-wrap;">{{ recipe.instructions }}</div>
+            <div class="instructions-body">{{ recipe.instructions }}</div>
         </div>
 
         <!-- URLs -->
         {% if recipe_urls %}
         <div class="card mb-3">
             <div class="card-header">Related URLs</div>
-            <div style="padding: 1rem;">
-                <ul style="list-style: none; padding: 0;">
+            <div class="card-body">
+                {% spaceless %}<ul class="list-plain">
                     {% for url in recipe_urls %}
-                    <li style="padding: 0.5rem 0;">
-                        <a href="{{ url.url }}" target="_blank" rel="noopener" style="word-break: break-all;">
+                    <li class="url-item">
+                        <a href="{{ url.url }}" target="_blank" rel="noopener" class="link-break">
                             {{ url.url }}
                         </a>
-                        {% if url.description %}<span style="color: var(--text-muted);"> ({{ url.description }})</span>{% endif %}
-                        {% if url.is_primary %}<span style="color: var(--success);"> &#x2713; Primary</span>{% endif %}
+                        {% if url.description %}<span class="text-muted-em"> ({{ url.description }})</span>{% endif %}
+                        {% if url.is_primary %}<span class="text-success"> &#x2713; Primary</span>{% endif %}
                     </li>
                     {% endfor %}
-                </ul>
+                </ul>{% endspaceless %}
             </div>
         </div>
         {% endif %}
@@ -124,17 +149,17 @@
         <!-- Ratings Summary -->
         <div class="card mb-3">
             <div class="card-header">Ratings</div>
-            <div style="padding: 1rem;">
+            <div class="card-body">
                 {% if avg_published_rating %}
                     <p><strong>Published Rating:</strong> 
-                        <span style="font-size: 1.5rem; color: var(--warning);">★</span>
+                        <span class="rating-star">★</span>
                         {{ avg_published_rating }}/5
                     </p>
                 {% endif %}
                 
                 {% if avg_personal_rating %}
                     <p><strong>Community Rating:</strong> 
-                        <span style="font-size: 1.5rem; color: var(--warning);">★</span>
+                        <span class="rating-star">★</span>
                         {{ avg_personal_rating }}/5
                     </p>
                 {% endif %}
@@ -149,15 +174,15 @@
         {% if user.is_authenticated %}
         <div class="card mb-3">
             <div class="card-header">Your Rating</div>
-            <div style="padding: 1rem;">
+            <div class="card-body">
                 {% if user_rating %}
                     <p><strong>Your Score:</strong> {{ user_rating.score }}/5</p>
                     {% if user_rating.notes %}
                         <p><strong>Your Notes:</strong></p>
-                        <p style="white-space: pre-wrap; font-size: 0.9rem;">{{ user_rating.notes }}</p>
+                        <p class="notes-text">{{ user_rating.notes }}</p>
                     {% endif %}
                     <hr>
-                    <p style="font-size: 0.9rem; color: var(--text-muted);">Update your rating:</p>
+                    <p class="text-muted-sm">Update your rating:</p>
                 {% else %}
                     <p>Rate this recipe:</p>
                 {% endif %}
@@ -172,7 +197,7 @@
                         <label>Notes</label>
                         {{ rating_form.notes }}
                     </div>
-                    <button type="submit" class="btn btn-primary" style="width: 100%;">
+                    <button type="submit" class="btn btn-primary btn-full">
                         {% if user_rating %}Update{% else %}Submit{% endif %} Rating
                     </button>
                 </form>
@@ -184,15 +209,15 @@
         {% if published_ratings %}
         <div class="card mb-3">
             <div class="card-header">Published Reviews</div>
-            <div style="padding: 1rem;">
+            <div class="card-body">
                 {% for rating in published_ratings %}
-                <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);">
+                <div class="review-item">
                     <p><strong>{{ rating.source }}</strong> - {{ rating.score }}/5</p>
                     {% if rating.review_text %}
-                        <p style="font-size: 0.9rem; color: var(--text-secondary);">{{ rating.review_text }}</p>
+                        <p class="text-secondary-sm">{{ rating.review_text }}</p>
                     {% endif %}
                     {% if rating.source_url %}
-                        <a href="{{ rating.source_url }}" target="_blank" rel="noopener" style="font-size: 0.85rem;">Read full review</a>
+                        <a href="{{ rating.source_url }}" target="_blank" rel="noopener" class="review-link">Read full review</a>
                     {% endif %}
                 </div>
                 {% endfor %}
@@ -204,14 +229,14 @@
         {% if personal_ratings %}
         <div class="card">
             <div class="card-header">Community Reviews ({{ personal_ratings.count }})</div>
-            <div style="padding: 1rem; max-height: 300px; overflow-y: auto;">
+            <div class="card-body-scroll">
                 {% for rating in personal_ratings %}
-                <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);">
+                <div class="review-item">
                     <p><strong>{{ rating.user.username }}</strong> - {{ rating.score }}/5</p>
                     {% if rating.notes %}
-                        <p style="font-size: 0.9rem; color: var(--text-secondary); white-space: pre-wrap;">{{ rating.notes }}</p>
+                        <p class="text-secondary-prewrap">{{ rating.notes }}</p>
                     {% endif %}
-                    <p style="font-size: 0.8rem; color: var(--text-muted);">{{ rating.updated_at|date:"M d, Y" }}</p>
+                    <p class="text-muted-xs">{{ rating.updated_at|date:"M d, Y" }}</p>
                 </div>
                 {% endfor %}
             </div>

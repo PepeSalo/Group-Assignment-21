@@ -2,6 +2,26 @@
 
 {% block title %}OCR Upload - RecipeDB{% endblock %}
 
+{% block extra_css %}
+<style>
+    .upload-body { padding: 2rem; }
+    .upload-list { margin: 1rem 0 1rem 2rem; }
+    .field-error { color: var(--danger); font-size: 0.9rem; }
+    .help-text { display: block; margin-top: 0.5rem; color: var(--text-muted); }
+    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; }
+    .checkbox-label { margin: 0; }
+    .checkbox-help { color: var(--text-muted); display: block; margin-top: -0.5rem; margin-bottom: 1rem; }
+    .non-field-error { color: var(--danger); margin-bottom: 1rem; font-size: 0.9rem; }
+    .info-body { padding: 1rem; }
+    .info-ol { margin-left: 2rem; line-height: 2; }
+    .tips-heading { margin-top: 1rem; }
+    .tips-list { margin-left: 2rem; }
+    .sidebar-body { padding: 1rem; }
+    .sidebar-list { margin-left: 1.5rem; font-size: 0.9rem; }
+    .sidebar-desc { font-size: 0.9rem; color: var(--text-secondary); }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="mt-3 mb-3">
     <h1>Upload Recipe Image or URL</h1>
@@ -11,9 +31,9 @@
     <div class="col-md-8">
         <div class="card">
             <div class="card-header">Add Recipe via Image or URL</div>
-            <div style="padding: 2rem;">
+            <div class="upload-body">
                 <p>Upload a recipe image for OCR processing, paste a recipe URL to scrape data, or both. Our system will:</p>
-                <ul style="margin: 1rem 0 1rem 2rem;">
+                <ul class="upload-list">
                     <li>Extract recipe title, ingredients, and instructions from images (OCR)</li>
                     <li>Detect URLs in images and scrape recipe data from them</li>
                     <li>Scrape recipe data directly from a provided URL</li>
@@ -28,11 +48,11 @@
                         <label for="{{ form.image_file.id_for_label }}">Select Image (optional)</label>
                         {{ form.image_file }}
                         {% if form.image_file.errors %}
-                            <div style="color: var(--danger); font-size: 0.9rem;">
+                            <div class="field-error">
                                 {{ form.image_file.errors }}
                             </div>
                         {% endif %}
-                        <small style="display: block; margin-top: 0.5rem; color: var(--text-muted);">
+                        <small class="help-text">
                             {{ form.image_file.help_text }}
                         </small>
                     </div>
@@ -41,27 +61,27 @@
                         <label for="{{ form.recipe_url.id_for_label }}">Recipe URL (optional)</label>
                         {{ form.recipe_url }}
                         {% if form.recipe_url.errors %}
-                            <div style="color: var(--danger); font-size: 0.9rem;">
+                            <div class="field-error">
                                 {{ form.recipe_url.errors }}
                             </div>
                         {% endif %}
-                        <small style="display: block; margin-top: 0.5rem; color: var(--text-muted);">
+                        <small class="help-text">
                             {{ form.recipe_url.help_text }}
                         </small>
                     </div>
 
-                    <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem;">
+                    <div class="form-group checkbox-row">
                         {{ form.auto_search_web }}
-                        <label for="{{ form.auto_search_web.id_for_label }}" style="margin: 0;">
+                        <label for="{{ form.auto_search_web.id_for_label }}" class="checkbox-label">
                             {{ form.auto_search_web.label }}
                         </label>
                     </div>
-                    <small style="color: var(--text-muted); display: block; margin-top: -0.5rem; margin-bottom: 1rem;">
+                    <small class="checkbox-help">
                         {{ form.auto_search_web.help_text }}. Also enables scraping of URLs detected in OCR images.
                     </small>
 
                     {% if form.non_field_errors %}
-                        <div style="color: var(--danger); margin-bottom: 1rem; font-size: 0.9rem;">
+                        <div class="non-field-error">
                             {{ form.non_field_errors }}
                         </div>
                     {% endif %}
@@ -74,8 +94,8 @@
 
         <div class="card mt-3">
             <div class="card-header">How it works</div>
-            <div style="padding: 1rem;">
-                <ol style="margin-left: 2rem; line-height: 2;">
+            <div class="info-body">
+                <ol class="info-ol">
                     <li>Upload a recipe image, paste a URL, or both</li>
                     <li>If an image is provided, Tesseract OCR extracts text and detects URLs</li>
                     <li>If a URL is provided (or found in the image), the page is scraped for recipe data</li>
@@ -85,8 +105,8 @@
                     <li>Image files: on success, deleted from IMAGES folder; on failure, renamed with "ERR" prefix</li>
                 </ol>
 
-                <p style="margin-top: 1rem;"><strong>Tips for best results:</strong></p>
-                <ul style="margin-left: 2rem;">
+                <p class="tips-heading"><strong>Tips for best results:</strong></p>
+                <ul class="tips-list">
                     <li>Use clear, high-resolution images</li>
                     <li>For best results, paste the recipe URL directly</li>
                     <li>Images containing visible URLs will be automatically detected and scraped</li>
@@ -99,19 +119,19 @@
     <div class="col-md-4">
         <div class="card">
             <div class="card-header">Supported Input</div>
-            <div style="padding: 1rem;">
+            <div class="sidebar-body">
                 <p><strong>Image Files (OCR)</strong></p>
-                <ul style="margin-left: 1.5rem; font-size: 0.9rem;">
+                <ul class="sidebar-list">
                     <li>JPEG (.jpg, .jpeg)</li>
                     <li>PNG (.png)</li>
                 </ul>
 
                 <p class="mt-3"><strong>Recipe URLs</strong></p>
-                <p style="font-size: 0.9rem; color: var(--text-secondary);">
+                <p class="sidebar-desc">
                     Paste any recipe URL. Best results with sites using structured data (JSON-LD).
                     Works with most recipe sites including:
                 </p>
-                <ul style="margin-left: 1.5rem; font-size: 0.9rem;">
+                <ul class="sidebar-list">
                     <li>Recipe blogs and cooking sites</li>
                     <li>News articles with recipes</li>
                     <li>Finnish recipe sites (kotiliesi.fi, etc.)</li>
@@ -119,7 +139,7 @@
                 </ul>
 
                 <p class="mt-3"><strong>Data Protection</strong></p>
-                <p style="font-size: 0.9rem; color: var(--text-secondary);">
+                <p class="sidebar-desc">
                     Existing recipe data is protected. If scraped data conflicts with
                     existing data, you will be asked to confirm before any changes are made.
                 </p>
