@@ -12,11 +12,21 @@
 - [x] ~~Merge confirmation UI: keep/replace per field when scraped data conflicts with existing recipe~~
 - [x] ~~Auto-fill empty recipe fields from scraped data without user confirmation~~
 - [x] ~~Combined OCR + URL data merging (URL data preferred for structured fields)~~
-- [ ] Improve OCR text extraction with NLP for better ingredient and instruction parsing
+- [x] ~~URL-first OCR approach: when URL found in image + web search enabled, use URL scraping before OCR text extraction~~
+- [x] ~~Improved OCR text extraction: multi-pass heuristic parser with section headers, measurement patterns, bullets, fractions~~
+- [x] ~~Fix merge TypeError when ingredients are dicts (from URL scraping) instead of strings~~
+- [x] ~~Fix image file management: save uploaded image to recipe before closing file handle~~
+- [x] ~~Add image URL download: save scraped image_url to recipe image field~~
+- [x] ~~Proper conflict display: format ingredient dicts as human-readable "quantity - name" text~~
+- [x] ~~URL validation: reject non-HTTP paths (media files, local paths) from being stored as RecipeURLs~~
+- [x] ~~Prominent source URL display: show source URL in recipe info card and link image to source~~
+- [x] ~~Web-page noise filtering: skip breadcrumbs, nav bars, brand text, ratings for title extraction~~
+- [x] ~~Multi-line title combining with unmatched parenthesis detection~~
+- [x] ~~Known recipe site detection from OCR branding text (Food & Wine, Allrecipes, Bon Appétit, etc.)~~
+- [x] ~~Site-specific recipe search: search on detected site and slug-based URL guessing~~
 - [ ] Add support for handwritten recipe recognition
 - [ ] Implement batch OCR processing for multiple images
 - [ ] Add OCR language selection (currently English only)
-- [ ] Add image URL download: save scraped image_url to recipe image field
 - [ ] Improve URL scraping for non-recipe pages (news articles, blogs)
 
 ### Search & Filtering
@@ -73,6 +83,7 @@
 
 ### Testing
 - [x] ~~Increase test coverage with URL scraping, merge, and OCR URL detection tests (235 tests)~~
+- [x] ~~Added noise filtering tests, site detection tests, slug generation tests (284 tests)~~
 - [ ] Increase test coverage to >90%
 - [ ] Add integration tests for OCR workflow
 - [ ] Implement end-to-end testing with Selenium

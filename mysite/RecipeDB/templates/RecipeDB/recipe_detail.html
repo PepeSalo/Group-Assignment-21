@@ -28,7 +28,13 @@
         <!-- Recipe Image -->
         {% if recipe.image %}
         <div class="card mb-3">
+            {% if primary_source_url %}
+            <a href="{{ primary_source_url }}" target="_blank" rel="noopener" title="View original recipe at {{ primary_source_url }}">
+                <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" style="width: 100%; max-height: 400px; object-fit: cover; border-radius: 8px;">
+            </a>
+            {% else %}
             <img src="{{ recipe.image.url }}" alt="{{ recipe.title }}" style="width: 100%; max-height: 400px; object-fit: cover; border-radius: 8px;">
+            {% endif %}
         </div>
         {% endif %}
 
@@ -36,6 +42,14 @@
         <div class="card mb-3">
             <div class="card-header">Recipe Information</div>
             <div style="padding: 1rem;">
+                {% if primary_source_url %}
+                <p><strong>Source:</strong>
+                    <a href="{{ primary_source_url }}" target="_blank" rel="noopener" style="word-break: break-all;">
+                        {{ primary_source_url }}
+                    </a>
+                </p>
+                {% endif %}
+
                 <p><strong>Authors:</strong> 
                     {% for author in recipe.authors.all %}
                         {{ author.get_full_name }}{% if not forloop.last %}, {% endif %}
@@ -93,10 +107,11 @@
                 <ul style="list-style: none; padding: 0;">
                     {% for url in recipe_urls %}
                     <li style="padding: 0.5rem 0;">
-                        <a href="{{ url.url }}" target="_blank" rel="noopener">
-                            {% if url.description %}{{ url.description }}{% else %}{{ url.url }}{% endif %}
+                        <a href="{{ url.url }}" target="_blank" rel="noopener" style="word-break: break-all;">
+                            {{ url.url }}
                         </a>
-                        {% if url.is_primary %}<span style="color: var(--success);">(Primary)</span>{% endif %}
+                        {% if url.description %}<span style="color: var(--text-muted);"> ({{ url.description }})</span>{% endif %}
+                        {% if url.is_primary %}<span style="color: var(--success);"> &#x2713; Primary</span>{% endif %}
                     </li>
                     {% endfor %}
                 </ul>

@@ -100,6 +100,178 @@ OCR_URL_REGEX = re.compile(
     re.IGNORECASE
 )
 
+# Known recipe website brands → search URL templates
+# Maps OCR-detected branding text to site search URLs
+KNOWN_RECIPE_SITES = {
+    'food< wine': 'https://www.foodandwine.com/?s={}',
+    'food & wine': 'https://www.foodandwine.com/?s={}',
+    'food and wine': 'https://www.foodandwine.com/?s={}',
+    'foodandwine': 'https://www.foodandwine.com/?s={}',
+    'allrecipes': 'https://www.allrecipes.com/search?q={}',
+    'bon appetit': 'https://www.bonappetit.com/search?q={}',
+    'bon appétit': 'https://www.bonappetit.com/search?q={}',
+    'epicurious': 'https://www.epicurious.com/search?q={}',
+    'simplyrecipes': 'https://www.simplyrecipes.com/?s={}',
+    'simply recipes': 'https://www.simplyrecipes.com/?s={}',
+    'tasty': 'https://tasty.co/search?q={}',
+    'delish': 'https://www.delish.com/search/?q={}',
+    'serious eats': 'https://www.seriouseats.com/search?q={}',
+    'seriouseats': 'https://www.seriouseats.com/search?q={}',
+    'feasting at home': 'https://www.feastingathome.com/?s={}',
+    'feastingathome': 'https://www.feastingathome.com/?s={}',
+    'nyt cooking': 'https://cooking.nytimes.com/search?q={}',
+    'kotiliesi': 'https://kotiliesi.fi/?s={}',
+    'makuja': 'https://www.mtvuutiset.fi/makuja/?s={}',
+}
+
+# Known recipe URL path patterns per domain (for slug-based guessing)
+# Each domain maps to a list of URL templates where {} is the slug
+KNOWN_RECIPE_URL_PATTERNS = {
+    'www.foodandwine.com': [
+        'https://www.foodandwine.com/recipes/{}',
+        'https://www.foodandwine.com/{}',
+    ],
+    'www.allrecipes.com': [
+        'https://www.allrecipes.com/recipe/{}/',
+    ],
+    'www.bonappetit.com': [
+        'https://www.bonappetit.com/recipe/{}',
+    ],
+    'www.epicurious.com': [
+        'https://www.epicurious.com/recipes/food/views/{}',
+    ],
+    'www.simplyrecipes.com': [
+        'https://www.simplyrecipes.com/recipes/{}/',
+        'https://www.simplyrecipes.com/{}/',
+    ],
+    'www.seriouseats.com': [
+        'https://www.seriouseats.com/{}',
+        'https://www.seriouseats.com/recipes/{}',
+    ],
+}
+
+
+def _detect_recipe_site(text):
+    """
+    Detect a known recipe website from OCR text branding.
+
+    Args:
+        text: raw OCR text
+
+    Returns:
+        (site_name, search_url_template) or (None, None)
+    """
+    lower = text.lower()
+    for brand, search_template in KNOWN_RECIPE_SITES.items():
+        if brand in lower:
+            return brand, search_template
+    return None, None
+
+
+def _title_to_slug(title):
+    """
+    Convert a recipe title to a URL slug.
+
+    Removes parenthetical text to generate multiple slug variants:
+    full title, inner parenthetical, and title without parenthetical.
+
+    Args:
+        title: Recipe title string
+
+    Returns:
+        list of slug variants to try
+    """
+    import re
+
+    slugs = []
+
+    # Helper: convert text to slug
+    def _slugify(text):
+        text = text.lower().strip()
+        text = re.sub(r'[^\w\s-]', '', text)  # Remove special chars
+        text = re.sub(r'[\s_]+', '-', text)   # Spaces/underscores to hyphens
+        text = re.sub(r'-+', '-', text)        # Collapse multiple hyphens
+        return text.strip('-')
+
+    # Full title as slug
+    full_slug = _slugify(title)
+    if full_slug:
+        slugs.append(full_slug)
+
+    # If title has parenthetical, try variants
+    paren_match = re.search(r'\(([^)]+)\)', title)
+    if paren_match:
+        inner = paren_match.group(1)
+        outer = re.sub(r'\([^)]+\)', '', title).strip()
+        inner_slug = _slugify(inner)
+        outer_slug = _slugify(outer)
+        if inner_slug and inner_slug != full_slug:
+            slugs.append(inner_slug)
+        if outer_slug and outer_slug != full_slug:
+            slugs.append(outer_slug)
+
+    return slugs
+
+
+def _guess_recipe_url_by_slug(title, search_url_template):
+    """
+    Try to find a recipe page by constructing slug-based URLs.
+
+    Uses known URL patterns for the detected site and checks
+    whether those URLs exist (return HTTP 200).
+
+    Args:
+        title: Recipe title
+        search_url_template: The site's search URL template (used to
+            extract the domain)
+
+    Returns:
+        str URL if found, else None
+    """
+    import urllib.request
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(search_url_template)
+    domain = parsed.netloc
+    if not domain:
+        return None
+
+    url_patterns = KNOWN_RECIPE_URL_PATTERNS.get(domain, [])
+    if not url_patterns:
+        return None
+
+    slugs = _title_to_slug(title)
+    if not slugs:
+        return None
+
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
+        ),
+    }
+
+    for slug in slugs:
+        for pattern in url_patterns:
+            candidate_url = pattern.format(slug)
+            try:
+                req = urllib.request.Request(
+                    candidate_url, method='HEAD', headers=headers,
+                )
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    if response.status == 200:
+                        logger.info(
+                            f"Slug-based URL found: {candidate_url}"
+                        )
+                        return candidate_url
+            except Exception:
+                # URL doesn't exist, try next
+                continue
+
+    logger.info(f"No slug-based URL found for '{title}' on {domain}")
+    return None
+
 
 def _extract_urls_from_text(text):
     """
@@ -923,6 +1095,9 @@ class RecipeDetailView(DetailView):
             ).select_related('ingredient').order_by('order')
             
             context['recipe_urls'] = RecipeURL.objects.filter(recipe=recipe)
+            # Provide primary source URL for prominent display
+            primary_url_obj = RecipeURL.objects.filter(recipe=recipe, is_primary=True).first()
+            context['primary_source_url'] = primary_url_obj.url if primary_url_obj else ''
             context['published_ratings'] = PublishedRating.objects.filter(recipe=recipe)
             context['personal_ratings'] = PersonalRating.objects.filter(recipe=recipe)
             
@@ -1056,8 +1231,13 @@ def _save_source_url(recipe, source_url):
     """Save or update the primary source URL for a recipe."""
     if not source_url or not source_url.strip():
         return
-    
+
     source_url = source_url.strip()
+
+    # Only accept valid web URLs (not local file paths or media paths)
+    if not source_url.lower().startswith(('http://', 'https://')):
+        logger.warning(f"Ignoring non-HTTP source URL: {source_url!r}")
+        return
     
     # Try to update existing primary URL
     existing = RecipeURL.objects.filter(recipe=recipe, is_primary=True).first()
@@ -1224,14 +1404,12 @@ def ocr_upload(request):
                 ocr_data = None
                 url_data = None
                 detected_urls = []
+                ocr_result = None
 
-                # ---------- Step 1: OCR processing ----------
+                # ---------- Step 1: OCR text extraction ----------
                 if image_file:
                     ocr_result = process_ocr_image(image_file, request.user, auto_search_web=False)
                     logger.debug(f"OCR result: success={ocr_result.get('success')}")
-
-                    if ocr_result['success']:
-                        ocr_data = ocr_result.get('recipe_data', {})
 
                     # Extract URLs from OCR text even if OCR confidence is low
                     ocr_text = ocr_result.get('raw_text', '')
@@ -1239,33 +1417,43 @@ def ocr_upload(request):
                     if detected_urls:
                         logger.info(f"URLs found in OCR text: {detected_urls}")
 
-                    # Close the uploaded file to release handles
-                    image_file.close()
-                    gc.collect()
-
-                    # Handle IMAGES folder file management
-                    _handle_images_folder_file(original_filename, ocr_result['success'], request)
-
-                # ---------- Step 2: URL scraping ----------
-                # Scrape from explicit URL
+                # ---------- Step 2: URL-first approach ----------
+                # Priority 1: Explicit URL from the form
                 if recipe_url:
                     url_data = scrape_recipe_from_url(recipe_url)
                     if url_data['success']:
-                        messages.info(request, f"Successfully scraped recipe from URL.")
+                        messages.info(request, "Successfully scraped recipe from URL.")
                     else:
                         messages.warning(request, f"URL scraping: {url_data['error']}")
+                        url_data = None
 
-                # If no explicit URL but OCR detected URLs, try scraping them
-                if not url_data and detected_urls:
-                    for detected_url in detected_urls[:3]:  # Try up to 3 detected URLs
+                # Priority 2: If auto_search_web checked AND URLs detected in image, scrape them
+                if not url_data and detected_urls and auto_search_web:
+                    for detected_url in detected_urls[:3]:
                         url_data = scrape_recipe_from_url(detected_url)
-                        if url_data['success']:
+                        if url_data and url_data['success']:
                             messages.info(request, f"Scraped recipe from URL found in image: {detected_url}")
                             break
                         else:
                             logger.debug(f"Failed to scrape detected URL: {detected_url}")
+                            url_data = None
 
-                # If auto_search_web and we have a title but no URL data, search the web
+                # ---------- Step 3: Fall back to OCR text extraction ----------
+                # Only parse OCR text if URL scraping didn't produce good data
+                if image_file and ocr_result:
+                    if url_data and url_data.get('success'):
+                        # URL scraping worked — skip basic OCR text parse,
+                        # but add detected URLs as source_url if not already set
+                        if not url_data.get('source_url') and detected_urls:
+                            url_data['source_url'] = detected_urls[0]
+                        logger.info("Using URL-scraped data instead of OCR text extraction.")
+                    elif ocr_result['success']:
+                        ocr_data = ocr_result.get('recipe_data', {})
+                        # Attach any detected URLs to OCR data as source_url
+                        if detected_urls and not ocr_data.get('source_url'):
+                            ocr_data['source_url'] = detected_urls[0]
+
+                # Priority 3: If auto_search_web and we have a title but no URL data, search the web
                 if auto_search_web and not url_data:
                     title = None
                     if ocr_data and ocr_data.get('title'):
@@ -1275,24 +1463,58 @@ def ocr_upload(request):
                         if found_url:
                             url_data = scrape_recipe_from_url(found_url)
                             if url_data and url_data['success']:
-                                messages.info(request, f"Found and scraped recipe from web search.")
+                                messages.info(request, "Found and scraped recipe from web search.")
+                            else:
+                                url_data = None
 
-                # ---------- Step 3: Combine data and decide action ----------
+                        # If general web search failed, try site-specific search
+                        if not url_data:
+                            ocr_text = ocr_result.get('raw_text', '') if ocr_result else ''
+                            site_name, search_template = _detect_recipe_site(ocr_text)
+                            if search_template:
+                                logger.info(f"Detected recipe site '{site_name}', searching on site...")
+                                # Strategy A: search the site's search page
+                                site_url = _search_recipe_on_site(title, search_template)
+                                # Strategy B: try slug-based URL guessing
+                                if not site_url:
+                                    site_url = _guess_recipe_url_by_slug(
+                                        title, search_template,
+                                    )
+                                if site_url:
+                                    url_data = scrape_recipe_from_url(site_url)
+                                    if url_data and url_data['success']:
+                                        messages.info(
+                                            request,
+                                            f"Found recipe on {site_name}!"
+                                        )
+                                    else:
+                                        url_data = None
+
+                # ---------- Step 4: Combine data and decide action ----------
                 combined_data = _combine_ocr_and_url_data(ocr_data, url_data)
 
                 if not combined_data or not combined_data.get('title'):
                     if image_file and not (ocr_data or url_data):
-                        if ocr_result.get('error'):
+                        if ocr_result and ocr_result.get('error'):
                             messages.error(request, f"OCR failed: {ocr_result['error']}")
                         else:
                             messages.error(request, "Could not extract recipe data.")
                     elif not url_data:
                         messages.error(request, "No recipe data could be extracted.")
+                    # Clean up file handles before returning
+                    if image_file:
+                        image_file.close()
+                        gc.collect()
+                        if ocr_result:
+                            _handle_images_folder_file(original_filename, False, request)
                     return render(request, 'RecipeDB/ocr_upload.html', {'form': form})
 
                 # Check for existing recipe (by URL first, then by title)
                 existing_recipe = None
-                if recipe_url:
+                source_url = combined_data.get('source_url', recipe_url or '')
+                if source_url:
+                    existing_recipe = _find_existing_recipe_by_url(source_url)
+                if not existing_recipe and recipe_url:
                     existing_recipe = _find_existing_recipe_by_url(recipe_url)
                 if not existing_recipe and combined_data.get('title'):
                     existing_recipe = _find_existing_recipe_by_title(combined_data['title'])
@@ -1310,23 +1532,52 @@ def ocr_upload(request):
                             f"Auto-filled {len(auto_updates)} empty field(s) in '{existing_recipe.title}'."
                         )
 
+                    # Save uploaded image to existing recipe if it doesn't have one
+                    if image_file and not existing_recipe.image:
+                        try:
+                            image_file.seek(0)
+                            existing_recipe.image.save(image_file.name, image_file, save=True)
+                        except Exception as e:
+                            logger.warning(f"Could not save image to existing recipe: {e}")
+
                     if conflicts:
                         # Store combined data and conflicts in session for merge confirmation
                         request.session['merge_recipe_id'] = existing_recipe.pk
                         request.session['merge_conflicts'] = _serialize_conflicts(conflicts)
                         request.session['merge_new_data'] = _serialize_new_data(combined_data)
+                        # Clean up file handles
+                        if image_file:
+                            image_file.close()
+                            gc.collect()
+                            _handle_images_folder_file(original_filename, True, request)
                         return redirect('recipe_merge_confirm')
                     else:
+                        # Clean up file handles
+                        if image_file:
+                            image_file.close()
+                            gc.collect()
+                            _handle_images_folder_file(original_filename, True, request)
                         return redirect('recipe_detail', pk=existing_recipe.pk)
                 else:
                     # No existing recipe - create new one
                     recipe = _create_recipe_from_data(combined_data, request.user, image_file)
                     messages.success(request, f"Recipe '{recipe.title}' created successfully!")
+                    # Clean up file handles AFTER saving to recipe
+                    if image_file:
+                        image_file.close()
+                        gc.collect()
+                        _handle_images_folder_file(original_filename, True, request)
                     return redirect('recipe_detail', pk=recipe.pk)
 
             except Exception as e:
                 logger.error(f"Error during OCR upload: {e}", exc_info=True)
                 messages.error(request, f'Error processing: {e}')
+                # Ensure file handles are cleaned up on error
+                if 'image_file' in locals() and image_file and hasattr(image_file, 'close'):
+                    try:
+                        image_file.close()
+                    except Exception:
+                        pass
     else:
         form = OCRUploadForm()
 
@@ -1562,6 +1813,24 @@ def _create_recipe_from_data(data, user, image_file=None):
             recipe.image.save(image_file.name, image_file, save=True)
         except Exception as e:
             logger.warning(f"Could not save uploaded image: {e}")
+    elif data.get('image_url'):
+        # Try to download image from URL
+        try:
+            img_url = data['image_url']
+            req = urllib.request.Request(
+                img_url,
+                headers={'User-Agent': SCRAPE_USER_AGENT}
+            )
+            with urllib.request.urlopen(req, timeout=SCRAPE_TIMEOUT) as resp:
+                img_data = resp.read()
+            # Determine filename from URL
+            url_path = urllib.parse.urlparse(img_url).path
+            img_name = os.path.basename(url_path) or 'recipe_image.jpg'
+            from django.core.files.base import ContentFile
+            recipe.image.save(img_name, ContentFile(img_data), save=True)
+            logger.info(f"Downloaded recipe image from: {img_url}")
+        except Exception as e:
+            logger.warning(f"Could not download image from URL: {e}")
 
     # Add ingredients
     if data.get('ingredients'):
@@ -1580,28 +1849,58 @@ def _create_recipe_from_data(data, user, image_file=None):
             )
             recipe.genres.add(genre)
 
-    # Add source URL
-    source_url = data.get('source_url', '')
-    if source_url:
-        RecipeURL.objects.create(
-            recipe=recipe,
-            url=source_url,
-            description='Source',
-            is_primary=True,
-        )
+    # Add source URL (must be a valid web URL, not a local file path)
+    source_url = data.get('source_url', '').strip()
+    if source_url and source_url.lower().startswith(('http://', 'https://')):
+        try:
+            RecipeURL.objects.create(
+                recipe=recipe,
+                url=source_url,
+                description='Source',
+                is_primary=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not save source URL '{source_url}': {e}")
+    elif source_url:
+        logger.warning(f"Ignoring non-HTTP source URL: {source_url!r}")
 
     return recipe
 
 
 def _serialize_conflicts(conflicts):
-    """Serialize conflicts dict for session storage."""
+    """Serialize conflicts dict for session storage.
+    
+    Lists of ingredient dicts are formatted as human-readable text for display,
+    while the actual data is preserved in merge_new_data for the merge operation.
+    """
     serialized = {}
     for field, data in conflicts.items():
         serialized[field] = {
-            'existing': data['existing'] if isinstance(data['existing'], str) else str(data['existing']),
-            'new': data['new'] if isinstance(data['new'], str) else str(data['new']),
+            'existing': _format_conflict_value(data['existing']),
+            'new': _format_conflict_value(data['new']),
         }
     return serialized
+
+
+def _format_conflict_value(value):
+    """Format a conflict value for human-readable display."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                # Ingredient dict: show "quantity - name" or just "name"
+                name = item.get('name', '')
+                qty = item.get('quantity', '')
+                if qty:
+                    parts.append(f"{qty} - {name}")
+                else:
+                    parts.append(name)
+            else:
+                parts.append(str(item))
+        return '\n'.join(parts)
+    return str(value)
 
 
 def _serialize_new_data(data):
@@ -1656,7 +1955,19 @@ def recipe_merge_confirm(request):
                     recipe.save()
                     updates_applied += 1
                 elif field == 'ingredients' and new_val:
-                    _save_ingredients_from_text(recipe, '\n'.join(new_val) if isinstance(new_val, list) else str(new_val))
+                    if isinstance(new_val, list):
+                        if new_val and isinstance(new_val[0], dict):
+                            # List of ingredient dicts from URL scraping
+                            RecipeIngredient.objects.filter(recipe=recipe).delete()
+                            _save_ingredients_list(recipe, new_val)
+                        else:
+                            # List of strings
+                            _save_ingredients_from_text(
+                                recipe,
+                                '\n'.join(str(item) for item in new_val)
+                            )
+                    else:
+                        _save_ingredients_from_text(recipe, str(new_val))
                     updates_applied += 1
                 elif field == 'authors' and new_val:
                     recipe.authors.clear()
@@ -1822,54 +2133,456 @@ def _search_web_for_recipe(title):
         return None
 
 
+def _search_recipe_on_site(title, search_url_template):
+    """
+    Search a specific recipe site for a recipe by title.
+
+    Fetches the site's search results page and extracts the best
+    matching recipe link from the HTML by ranking candidates on how
+    many title words appear in the link text / URL.
+
+    Args:
+        title: Recipe title to search for
+        search_url_template: URL template with {} placeholder for query
+
+    Returns:
+        str URL of the recipe page, or None
+    """
+    import urllib.request
+    import urllib.parse
+
+    # Minimum fraction of significant title words required to match
+    MIN_MATCH_RATIO = 0.4
+    # Absolute minimum matches regardless of title length
+    MIN_ABSOLUTE_MATCHES = 2
+
+    try:
+        query = urllib.parse.quote(title)
+        search_url = search_url_template.format(query)
+        logger.info(f"Searching recipe site: {search_url}")
+
+        req = urllib.request.Request(
+            search_url,
+            headers={
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Safari/537.36'
+                ),
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html = response.read().decode('utf-8', errors='replace')
+
+        # Parse the domain from the search URL template for link matching
+        parsed = urllib.parse.urlparse(search_url_template)
+        base_domain = parsed.netloc or parsed.path.split('/')[0]
+
+        title_words = set(
+            w.lower() for w in re.findall(r'\w+', title)
+            if len(w) > 2
+        )
+        min_required = max(
+            MIN_ABSOLUTE_MATCHES,
+            int(len(title_words) * MIN_MATCH_RATIO),
+        )
+
+        # Navigation / non-recipe URL path segments to skip
+        skip_patterns = (
+            '/search', '/category', '/tag/', '/author/',
+            '/page/', '/about', '/contact', '/privacy',
+            '/terms', '/newsletter', '/subscribe',
+            '?s=', '?q=', '?search=',
+        )
+
+        def _score_link(href, text_content):
+            """Return (match_count, href) or None if link should be skipped."""
+            # Make absolute URL
+            if href.startswith('/'):
+                href = f"{parsed.scheme}://{base_domain}{href}"
+            if not href.startswith('http'):
+                return None
+            # Must be on the same site
+            link_domain = urllib.parse.urlparse(href).netloc
+            if base_domain not in link_domain:
+                return None
+            if any(pat in href.lower() for pat in skip_patterns):
+                return None
+            # Must have at least one path segment
+            path = urllib.parse.urlparse(href).path
+            segments = [s for s in path.split('/') if s]
+            if not segments:
+                return None
+            combined = (text_content or '').lower() + ' ' + href.lower()
+            # Use word-boundary matching (not substring) to avoid
+            # false positives like "red" in "sun-dried"
+            combined_words = set(re.findall(r'\w+', combined))
+            matches = sum(1 for w in title_words if w in combined_words)
+            return (matches, href)
+
+        candidates = []  # list of (match_count, href)
+
+        # Use BeautifulSoup if available, otherwise fall back to regex
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+            seen_hrefs = set()
+            for link in soup.find_all('a', href=True):
+                result = _score_link(link['href'], link.get_text())
+                if result and result[1] not in seen_hrefs:
+                    seen_hrefs.add(result[1])
+                    candidates.append(result)
+        except ImportError:
+            # Fallback: use regex to find links
+            link_pattern = re.compile(
+                rf'href=["\']'
+                rf'(https?://[^"\']*{re.escape(base_domain)}[^"\']*)'
+                rf'["\']',
+                re.IGNORECASE,
+            )
+            seen_hrefs = set()
+            for match in link_pattern.finditer(html):
+                href = match.group(1)
+                result = _score_link(href, '')
+                if result and result[1] not in seen_hrefs:
+                    seen_hrefs.add(result[1])
+                    candidates.append(result)
+
+        if not candidates:
+            logger.info(f"No candidate links found on site for '{title}'")
+            return None
+
+        # Sort by match count descending, pick the best
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_matches, best_href = candidates[0]
+
+        if best_matches >= min_required:
+            logger.info(
+                f"Found recipe on site: {best_href} "
+                f"({best_matches}/{len(title_words)} title words matched)"
+            )
+            return best_href
+
+        logger.info(
+            f"Best candidate '{best_href}' only matched "
+            f"{best_matches}/{len(title_words)} words "
+            f"(need {min_required}); skipping"
+        )
+        return None
+
+    except Exception as e:
+        logger.warning(f"Site search for '{title}' failed: {e}")
+        return None
+
+
 def extract_recipe_from_text(text):
     """
     Extract structured recipe data from OCR text.
-    
-    This is a simple implementation - you can enhance it with NLP.
-    
+
+    Uses multi-pass heuristics to identify recipe sections:
+    1. Filter out web-page noise (navigation, ads, breadcrumbs)
+    2. Detect section headers (Ingredients, Instructions/Directions, Author, etc.)
+    3. Identify ingredient lines by measurement keywords and patterns
+    4. Identify the title from the first prominent non-noise line
+    5. Remaining text becomes instructions
+
     Args:
         text: Raw text from OCR
-        
+
     Returns:
         dict with recipe data
     """
     lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
+
     recipe_data = {
         'title': '',
         'instructions': '',
         'authors': [],
-        'ingredients': []
+        'ingredients': [],
+        'genres': [],
+        'source_url': '',
+        'description': '',
     }
-    
+
+    if not lines:
+        return recipe_data
+
     try:
-        # First non-empty line is likely the title
-        if lines:
-            recipe_data['title'] = lines[0]
-        
-        # Simple heuristic: lines with measurements are likely ingredients
-        ingredient_keywords = ['cup', 'tablespoon', 'teaspoon', 'gram', 'g', 'kg', 'ml', 'oz', 'lb']
-        
-        for i, line in enumerate(lines[1:], start=1):
-            lower_line = line.lower()
-            if any(keyword in lower_line for keyword in ingredient_keywords):
-                # Try to separate quantity from ingredient name
-                parts = line.split(None, 2)  # Split into max 3 parts
-                if len(parts) >= 2:
+        # ---- Web-page noise patterns (to skip for title selection) ----
+        # Breadcrumb navigation (e.g., "FOOD > RECIPES > SOUPS")
+        BREADCRUMB_RE = re.compile(r'(?:>|›|»)\s*\w+.*(?:>|›|»)', re.IGNORECASE)
+        # Common website navigation / header words
+        NAV_KEYWORDS = {
+            'advertisement', 'advertise', 'ad', 'menu', 'subscribe', 'sign in',
+            'sign up', 'login', 'log in', 'newsletter', 'search', 'privacy',
+            'cookie', 'cookies', 'terms', 'about us', 'contact', 'share',
+            'copyright', 'all rights reserved', 'skip to content',
+            'skip to main', 'close', 'trending', 'popular', 'latest',
+        }
+        # Navigation bar pattern: multiple short uppercase words separated by spaces
+        NAV_BAR_RE = re.compile(
+            r'^(?:[A-Z]{2,}\s+){2,}[A-Z]{2,}$'
+        )
+        # Rating/review noise (e.g., "1.5(2) 2 REVIEWS", "★★★")
+        RATING_RE = re.compile(
+            r'(?:★|☆|\breviews?\b|\bratings?\b|\bstars?\b|\d+\s*\(\d+\))',
+            re.IGNORECASE,
+        )
+        # Very short lines that are likely OCR noise or site branding
+        # (e.g., "FOOD< WINE", "F&W", "NYT")
+        BRAND_RE = re.compile(
+            r'^[A-Z\s<>&|/\\]{2,30}$'
+        )
+
+        def _is_noise_line(line):
+            """Check if a line is likely web-page noise rather than recipe content."""
+            lower = line.lower().strip()
+            # Exact match of common noise
+            if lower in NAV_KEYWORDS:
+                return True
+            # Breadcrumb navigation
+            if BREADCRUMB_RE.search(line):
+                return True
+            # All-caps navigation bar
+            if NAV_BAR_RE.match(line):
+                return True
+            # Short branding text in all caps with punctuation
+            if len(line) < 30 and BRAND_RE.match(line):
+                return True
+            # Contains multiple nav keywords (whole-word matching to
+            # avoid false positives like "cookies" in recipe titles)
+            line_words = set(re.findall(r'\w+', lower))
+            nav_hits = sum(
+                1 for kw in NAV_KEYWORDS
+                if set(kw.split()) <= line_words
+            )
+            if nav_hits >= 2:
+                return True
+            # Rating/review lines
+            if RATING_RE.search(line) and len(line) < 60:
+                return True
+            return False
+
+        # ---- Section header detection ----
+        SECTION_PATTERNS = {
+            'ingredients': re.compile(
+                r'^\s*(?:ingredients|ingredienser|ainekset|zutaten|ingrédients)\s*:?\s*$',
+                re.IGNORECASE,
+            ),
+            'instructions': re.compile(
+                r'^\s*(?:instructions?|directions?|method|preparation|steps|valmistusohje|ohje|zubereitung)\s*:?\s*$',
+                re.IGNORECASE,
+            ),
+            'author': re.compile(
+                r'^\s*(?:by|author|chef|recipe\s+by|from|kirjoittanut)\s*:?\s*',
+                re.IGNORECASE,
+            ),
+        }
+
+        # Measurement / ingredient line patterns
+        MEASUREMENT_RE = re.compile(
+            r'(?:^|\s)'
+            r'(?:\d+[\s/\-\.½¼¾⅓⅔⅛]*'
+            r'(?:cups?|tablespoons?|tbsp|teaspoons?|tsp|grams?|g\b|kg\b|'
+            r'ml\b|dl\b|l\b|oz\b|ounces?|lb|lbs|pounds?|pieces?|pcs|'
+            r'pinch|cloves?|bunch|cans?|sticks?|slices?|large|medium|small|whole))',
+            re.IGNORECASE,
+        )
+        # Bullet or numbered list item (common in ingredient lists)
+        BULLET_RE = re.compile(r'^\s*(?:[\-\*•·]|\d+[\)\.]?)\s+')
+        # Fraction at start
+        FRACTION_RE = re.compile(
+            r'^\s*(?:\d+\s*/\s*\d+|\d+\.\d+|[½¼¾⅓⅔⅛]|\d+\s*[½¼¾⅓⅔⅛])\s+',
+        )
+
+        # ---- Classify each line ----
+        # States: 'unknown', 'title', 'ingredients', 'instructions', 'author'
+        current_section = 'unknown'
+        title_candidates = []
+        ingredient_lines = []
+        instruction_lines = []
+        author_lines = []
+        unknown_lines = []  # lines before any section header
+        noise_lines = []    # web-page noise
+
+        for line in lines:
+            # Check for section headers
+            matched_section = None
+            for sec_name, sec_re in SECTION_PATTERNS.items():
+                if sec_re.search(line):
+                    matched_section = sec_name
+                    break
+
+            if matched_section == 'author':
+                current_section = 'author'
+                # The header line itself may contain the author name
+                cleaned = SECTION_PATTERNS['author'].sub('', line).strip()
+                if cleaned:
+                    author_lines.append(cleaned)
+                continue
+            elif matched_section:
+                current_section = matched_section
+                continue
+
+            # Dispatch to current section
+            if current_section == 'ingredients':
+                ingredient_lines.append(line)
+            elif current_section == 'instructions':
+                instruction_lines.append(line)
+            elif current_section == 'author':
+                author_lines.append(line)
+            else:
+                unknown_lines.append(line)
+
+        # ---- If no section headers found, use heuristic classification ----
+        if not ingredient_lines and not instruction_lines:
+            for line in unknown_lines:
+                if MEASUREMENT_RE.search(line) or FRACTION_RE.match(line):
+                    ingredient_lines.append(line)
+                elif BULLET_RE.match(line) and len(line) < 120:
+                    # Short bulleted items are likely ingredients
+                    ingredient_lines.append(BULLET_RE.sub('', line).strip())
+                else:
+                    title_candidates.append(line)
+        else:
+            title_candidates = unknown_lines
+
+        # ---- Extract title ----
+        # Strategy 1: Look for a line right after breadcrumbs/noise that
+        #             looks like a recipe title (substantial, not noise).
+        #             Multi-line titles are common in OCR ("Shorbet Ads (Egyptian Red\nLentil Soup)")
+        found_breadcrumb = False
+        post_breadcrumb_lines = []
+        for candidate in title_candidates:
+            stripped = candidate.strip()
+            if not stripped:
+                continue
+            if _is_noise_line(stripped):
+                if BREADCRUMB_RE.search(stripped):
+                    found_breadcrumb = True
+                noise_lines.append(stripped)
+                continue
+            if found_breadcrumb:
+                post_breadcrumb_lines.append(stripped)
+
+        # If we found lines after a breadcrumb, combine adjacent short lines
+        # as a multi-line title (common in OCR of webpages)
+        if post_breadcrumb_lines:
+            # Combine consecutive short lines that form the title
+            title_parts = []
+            for pbl in post_breadcrumb_lines:
+                if URL_REGEX.match(pbl) or pbl.lower().startswith('http'):
+                    break
+                if _is_noise_line(pbl):
+                    break
+                # Stop at a very long line (likely description, not title)
+                if len(pbl) > 80 and title_parts:
+                    break
+                title_parts.append(pbl)
+                combined = ' '.join(title_parts)
+                # Check if title appears complete:
+                # - Has at least MIN_TITLE_LENGTH chars
+                # - No unmatched parentheses/brackets (continuation signal)
+                MIN_TITLE_LENGTH = 10
+                has_unmatched = (
+                    combined.count('(') != combined.count(')') or
+                    combined.count('[') != combined.count(']')
+                )
+                if len(combined) >= MIN_TITLE_LENGTH and not has_unmatched:
+                    break
+            if title_parts:
+                recipe_data['title'] = ' '.join(title_parts)
+                # Remove used lines from title_candidates
+                for tp in title_parts:
+                    if tp in title_candidates:
+                        title_candidates.remove(tp)
+
+        # Strategy 2: Fallback — first non-noise, non-URL, substantial line
+        if not recipe_data['title']:
+            for candidate in title_candidates:
+                stripped = candidate.strip()
+                if not stripped:
+                    continue
+                # Skip URLs
+                if URL_REGEX.match(stripped) or stripped.lower().startswith('http'):
+                    continue
+                # Skip noise lines
+                if _is_noise_line(stripped):
+                    noise_lines.append(stripped)
+                    continue
+                # Skip very short lines (likely OCR noise)
+                if len(stripped) < 3:
+                    continue
+                # A reasonable title is < ~120 chars
+                if len(stripped) <= 120:
+                    recipe_data['title'] = stripped
+                    title_candidates.remove(candidate)
+                    break
+
+        # ---- Build instructions from remaining title_candidates + instruction_lines ----
+        all_instructions = []
+        # Lines before ingredients that weren't chosen as title (skip noise)
+        for candidate in title_candidates:
+            stripped = candidate.strip()
+            if stripped and not MEASUREMENT_RE.search(stripped) and stripped not in noise_lines:
+                all_instructions.append(stripped)
+        all_instructions.extend(instruction_lines)
+        recipe_data['instructions'] = '\n'.join(all_instructions).strip()
+
+        # ---- Parse ingredient lines ----
+        for idx, line in enumerate(ingredient_lines):
+            # Remove bullet / numbering prefix
+            clean = BULLET_RE.sub('', line).strip()
+            if not clean:
+                continue
+            # Try to separate quantity from name
+            qty_match = re.match(
+                r'^(\d[\d\s/\.½¼¾⅓⅔⅛]*\s*'
+                r'(?:cups?|tablespoons?|tbsp|teaspoons?|tsp|grams?|g\b|kg\b|'
+                r'ml\b|dl\b|l\b|oz\b|ounces?|lb|lbs|pounds?|pieces?|pcs|'
+                r'pinch|cloves?|bunch|cans?|sticks?|slices?|large|medium|small|whole)?)'
+                r'\s+(.+)',
+                clean,
+                re.IGNORECASE,
+            )
+            if qty_match:
+                recipe_data['ingredients'].append({
+                    'name': qty_match.group(2).strip(),
+                    'quantity': qty_match.group(1).strip(),
+                    'order': idx,
+                })
+            else:
+                # Try simple "number name" split
+                parts = clean.split(None, 1)
+                if len(parts) == 2 and any(c.isdigit() for c in parts[0]):
                     recipe_data['ingredients'].append({
-                        'name': ' '.join(parts[1:]) if len(parts) > 2 else parts[1],
+                        'name': parts[1],
                         'quantity': parts[0],
-                        'order': len(recipe_data['ingredients'])
+                        'order': idx,
                     })
-        
-        # Everything else goes to instructions
-        instruction_lines = [l for l in lines[1:] if l not in [ing['name'] for ing in recipe_data['ingredients']]]
-        recipe_data['instructions'] = '\n'.join(instruction_lines)
-        
+                else:
+                    recipe_data['ingredients'].append({
+                        'name': clean,
+                        'quantity': '',
+                        'order': idx,
+                    })
+
+        # ---- Authors ----
+        for a in author_lines:
+            a = a.strip()
+            if a and len(a) > 1:
+                recipe_data['authors'].append(a)
+
+        # ---- Extract URLs from the text and set source_url ----
+        all_urls = _extract_urls_from_text(text)
+        if all_urls:
+            recipe_data['source_url'] = all_urls[0]
+
     except Exception as e:
         logger.error(f"Error extracting recipe data from text: {e}")
-    
+
     return recipe_data
 
 

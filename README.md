@@ -21,11 +21,19 @@ RecipeDB is a comprehensive web application built with Django 6.0.2 that allows 
 ### OCR & Image Processing
 - **Tesseract OCR**: Extracts recipe text (title, ingredients, instructions) from uploaded images
 - **Confidence Scoring**: Configurable threshold (default 40%) determines OCR success/failure
+- **URL-First Approach**: When a URL is detected in an OCR image and "search web" is enabled, the system scrapes the URL first (using the superior URL-based extraction) before falling back to OCR text parsing
+- **Improved Text Extraction**: Multi-pass heuristic parser that detects section headers (Ingredients, Instructions, Author), measurement patterns, bullet/numbered lists, and fraction notation for more accurate recipe extraction from OCR text
+- **Web-Page Noise Filtering**: Automatically filters out website navigation bars, breadcrumbs (e.g., "FOOD > RECIPES > SOUPS"), brand text (e.g., "FOOD< WINE"), ratings/reviews, and ad keywords so that the actual recipe title is extracted instead of site branding
+- **Multi-Line Title Detection**: Combines adjacent short lines with unmatched parentheses as a single title (e.g., "Shorbet Ads (Egyptian Red\nLentil Soup)" → "Shorbet Ads (Egyptian Red Lentil Soup)")
+- **Known Recipe Site Detection**: Detects ~20 major recipe websites (Food & Wine, Allrecipes, Bon Appétit, Epicurious, Simply Recipes, etc.) from OCR-captured branding text
+- **Site-Specific Recipe Search**: When a known recipe site is detected, searches the site's own search page and tries slug-based URL construction to find the original recipe page
 - **URL Detection in Images**: OCR scans images for URLs and automatically repairs common OCR artifacts (missing `://`, extra spaces, spurious uppercase letters)
 - **Automatic File Management**:
   - **On success**: Source image is deleted from the IMAGES folder (via background thread)
   - **On failure**: Source image is renamed with `ERR_` prefix, original is deleted in background
   - Background thread retries deletion up to 30 times (2-second intervals) to handle file locks from antivirus, Windows Explorer thumbnails, or similar processes
+  - Uploaded images are saved to the recipe's `media/recipes/` folder
+- **Image Download from URL**: When URL scraping finds a recipe image URL, it is automatically downloaded and saved to the recipe
 - **Web Search Integration**: Optionally searches DuckDuckGo for recipe URLs on successful OCR
 - **Smart Filename Matching**: Handles Django's filename sanitization (spaces → underscores) with multi-strategy matching (exact, spaces-restored, fuzzy stem matching)
 
@@ -288,6 +296,10 @@ Test coverage includes:
 - ✅ URL scraping with mocked HTTP responses
 - ✅ OCR upload form validation (image or URL required)
 - ✅ Serialization for session storage
+- ✅ Web-page noise filtering (breadcrumbs, nav bars, brand text, ratings)
+- ✅ Multi-line title combining with unmatched parenthesis detection
+- ✅ Known recipe site detection from OCR branding text
+- ✅ Slug-based URL generation and title-to-slug conversion
 
 ## Technology Stack
 
