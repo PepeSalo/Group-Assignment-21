@@ -4,27 +4,28 @@
 
 {% block content %}
 <div class="mt-3 mb-3">
-    <h1>Upload Recipe Image for OCR Processing</h1>
+    <h1>Upload Recipe Image or URL</h1>
 </div>
 
 <div class="row">
     <div class="col-md-8">
         <div class="card">
-            <div class="card-header">Upload Image</div>
+            <div class="card-header">Add Recipe via Image or URL</div>
             <div style="padding: 2rem;">
-                <p>Upload a JPG or PNG image containing a recipe. Our OCR system will automatically extract:</p>
+                <p>Upload a recipe image for OCR processing, paste a recipe URL to scrape data, or both. Our system will:</p>
                 <ul style="margin: 1rem 0 1rem 2rem;">
-                    <li>Recipe title</li>
-                    <li>Ingredients and quantities</li>
-                    <li>Cooking instructions</li>
-                    <li>Author information (if available)</li>
+                    <li>Extract recipe title, ingredients, and instructions from images (OCR)</li>
+                    <li>Detect URLs in images and scrape recipe data from them</li>
+                    <li>Scrape recipe data directly from a provided URL</li>
+                    <li>Create a new recipe or update an existing one</li>
+                    <li>Ask for confirmation before overwriting existing data</li>
                 </ul>
 
                 <form method="post" enctype="multipart/form-data">
                     {% csrf_token %}
-                    
+
                     <div class="form-group">
-                        <label for="{{ form.image_file.id_for_label }}">Select Image *</label>
+                        <label for="{{ form.image_file.id_for_label }}">Select Image (optional)</label>
                         {{ form.image_file }}
                         {% if form.image_file.errors %}
                             <div style="color: var(--danger); font-size: 0.9rem;">
@@ -36,6 +37,19 @@
                         </small>
                     </div>
 
+                    <div class="form-group">
+                        <label for="{{ form.recipe_url.id_for_label }}">Recipe URL (optional)</label>
+                        {{ form.recipe_url }}
+                        {% if form.recipe_url.errors %}
+                            <div style="color: var(--danger); font-size: 0.9rem;">
+                                {{ form.recipe_url.errors }}
+                            </div>
+                        {% endif %}
+                        <small style="display: block; margin-top: 0.5rem; color: var(--text-muted);">
+                            {{ form.recipe_url.help_text }}
+                        </small>
+                    </div>
+
                     <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem;">
                         {{ form.auto_search_web }}
                         <label for="{{ form.auto_search_web.id_for_label }}" style="margin: 0;">
@@ -43,8 +57,14 @@
                         </label>
                     </div>
                     <small style="color: var(--text-muted); display: block; margin-top: -0.5rem; margin-bottom: 1rem;">
-                        {{ form.auto_search_web.help_text }}
+                        {{ form.auto_search_web.help_text }}. Also enables scraping of URLs detected in OCR images.
                     </small>
+
+                    {% if form.non_field_errors %}
+                        <div style="color: var(--danger); margin-bottom: 1rem; font-size: 0.9rem;">
+                            {{ form.non_field_errors }}
+                        </div>
+                    {% endif %}
 
                     <button type="submit" class="btn btn-primary">Upload and Process</button>
                     <a href="{% url 'recipe_list' %}" class="btn btn-secondary">Cancel</a>
@@ -56,20 +76,21 @@
             <div class="card-header">How it works</div>
             <div style="padding: 1rem;">
                 <ol style="margin-left: 2rem; line-height: 2;">
-                    <li>Upload a clear image of a recipe</li>
-                    <li>Tesseract OCR processes the image and extracts text</li>
-                    <li>The system analyzes the text and identifies recipe components</li>
-                    <li>If OCR confidence is above the threshold, the recipe is automatically added</li>
-                    <li>On success: the original image is moved to the recipes folder and deleted from IMAGES</li>
-                    <li>On failure: the original image is renamed with an "ERR" prefix in the IMAGES folder</li>
+                    <li>Upload a recipe image, paste a URL, or both</li>
+                    <li>If an image is provided, Tesseract OCR extracts text and detects URLs</li>
+                    <li>If a URL is provided (or found in the image), the page is scraped for recipe data</li>
+                    <li>Recipe data from OCR and URL scraping are intelligently combined</li>
+                    <li>If the recipe is new, it is created automatically</li>
+                    <li>If a matching recipe exists, empty fields are auto-filled, and you are asked before overwriting existing data</li>
+                    <li>Image files: on success, deleted from IMAGES folder; on failure, renamed with "ERR" prefix</li>
                 </ol>
-                
+
                 <p style="margin-top: 1rem;"><strong>Tips for best results:</strong></p>
                 <ul style="margin-left: 2rem;">
-                    <li>Use high-resolution images</li>
-                    <li>Ensure good lighting and contrast</li>
-                    <li>Keep text horizontal and readable</li>
-                    <li>Avoid handwritten recipes (typed text works best)</li>
+                    <li>Use clear, high-resolution images</li>
+                    <li>For best results, paste the recipe URL directly</li>
+                    <li>Images containing visible URLs will be automatically detected and scraped</li>
+                    <li>Enable "Search web" to find additional data from detected URLs</li>
                 </ul>
             </div>
         </div>
@@ -77,23 +98,31 @@
 
     <div class="col-md-4">
         <div class="card">
-            <div class="card-header">Requirements</div>
+            <div class="card-header">Supported Input</div>
             <div style="padding: 1rem;">
-                <p><strong>Tesseract OCR</strong></p>
-                <p style="font-size: 0.9rem; color: var(--text-secondary);">
-                    Make sure Tesseract OCR is installed on your system:
-                </p>
-                <ul style="margin-left: 1.5rem; font-size: 0.9rem;">
-                    <li><strong>Windows:</strong> Download from <a href="https://github.com/UB-Mannheim/tesseract/wiki" target="_blank">GitHub</a></li>
-                    <li><strong>Linux:</strong> <code>sudo apt-get install tesseract-ocr</code></li>
-                    <li><strong>Mac:</strong> <code>brew install tesseract</code></li>
-                </ul>
-                
-                <p class="mt-3"><strong>Supported Formats:</strong></p>
+                <p><strong>Image Files (OCR)</strong></p>
                 <ul style="margin-left: 1.5rem; font-size: 0.9rem;">
                     <li>JPEG (.jpg, .jpeg)</li>
                     <li>PNG (.png)</li>
                 </ul>
+
+                <p class="mt-3"><strong>Recipe URLs</strong></p>
+                <p style="font-size: 0.9rem; color: var(--text-secondary);">
+                    Paste any recipe URL. Best results with sites using structured data (JSON-LD).
+                    Works with most recipe sites including:
+                </p>
+                <ul style="margin-left: 1.5rem; font-size: 0.9rem;">
+                    <li>Recipe blogs and cooking sites</li>
+                    <li>News articles with recipes</li>
+                    <li>Finnish recipe sites (kotiliesi.fi, etc.)</li>
+                    <li>International recipe sites</li>
+                </ul>
+
+                <p class="mt-3"><strong>Data Protection</strong></p>
+                <p style="font-size: 0.9rem; color: var(--text-secondary);">
+                    Existing recipe data is protected. If scraped data conflicts with
+                    existing data, you will be asked to confirm before any changes are made.
+                </p>
             </div>
         </div>
     </div>

@@ -360,14 +360,24 @@ class GenreForm(forms.ModelForm):
 class OCRUploadForm(forms.Form):
     """Form for uploading images for OCR processing."""
     image_file = forms.ImageField(
-        required=True,
+        required=False,
         widget=forms.FileInput(attrs={
             'class': 'form-control',
             'accept': 'image/jpeg,image/png'
         }),
         help_text='Upload a JPG or PNG image containing a recipe'
     )
-    
+
+    recipe_url = forms.URLField(
+        required=False,
+        widget=forms.URLInput(attrs={
+            'class': 'form-control',
+            'placeholder': 'https://example.com/recipe'
+        }),
+        label='Recipe URL',
+        help_text='Paste a recipe URL to scrape recipe data from the web page'
+    )
+
     auto_search_web = forms.BooleanField(
         required=False,
         initial=False,
@@ -377,3 +387,14 @@ class OCRUploadForm(forms.Form):
         label='Search web for additional information',
         help_text='Search the web for the same recipe to find additional images and data'
     )
+
+    def clean(self):
+        """Ensure at least one of image_file or recipe_url is provided."""
+        cleaned = super().clean()
+        image_file = cleaned.get('image_file')
+        recipe_url = cleaned.get('recipe_url')
+        if not image_file and not recipe_url:
+            raise ValidationError(
+                'Please provide either an image file or a recipe URL (or both).'
+            )
+        return cleaned

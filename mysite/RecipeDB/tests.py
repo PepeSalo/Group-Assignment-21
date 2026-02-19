@@ -12,16 +12,26 @@ import tempfile
 import shutil
 import threading
 import time
+import urllib.error
 
 from .models import (
     Author, Genre, Ingredient, Recipe, RecipeIngredient,
     PublishedRating, PersonalRating, RecipeURL,
     MAX_RATING, MIN_RATING, MAX_NAME_LENGTH, MAX_TITLE_LENGTH
 )
+from .forms import OCRUploadForm
 from .views import (
     _save_ingredients_from_text, _save_authors_from_text,
     _save_genres_from_text, _save_source_url,
     _background_delete_file, extract_recipe_from_text,
+    _extract_urls_from_text, _repair_ocr_url,
+    _extract_jsonld_recipe, _parse_jsonld_recipe,
+    _clean_html_text, _merge_recipe_data,
+    _get_existing_recipe_data, _combine_ocr_and_url_data,
+    _find_existing_recipe_by_url, _find_existing_recipe_by_title,
+    _create_recipe_from_data, _save_ingredients_list,
+    _add_author_by_name, _serialize_conflicts, _serialize_new_data,
+    scrape_recipe_from_url,
 )
 
 
@@ -1334,3 +1344,1248 @@ class RecipePermissionTest(TestCase):
         response = self.client.post(reverse('recipe_delete', args=[self.recipe.pk]))
         self.assertEqual(response.status_code, 302)
         self.assertTrue(Recipe.objects.filter(pk=self.recipe.pk).exists())
+
+
+# ============= URL Extraction & Repair Tests =============
+
+class ExtractURLsFromTextTest(TestCase):
+    """Test _extract_urls_from_text with various URL formats."""
+
+    def test_clean_url_detected(self):
+        """Test standard clean URL is found."""
+        text = "Visit https://www.example.com/recipe for details."
+        urls = _extract_urls_from_text(text)
+        self.assertIn('https://www.example.com/recipe', urls)
+
+    def test_multiple_urls_detected(self):
+        """Test multiple URLs in text are all found."""
+        text = "See https://a.com and http://b.org/page?x=1 for info."
+        urls = _extract_urls_from_text(text)
+        self.assertGreaterEqual(len(urls), 2)
+
+    def test_url_with_path_and_query(self):
+        """Test URL with path, query, and fragment is preserved."""
+        text = "Link: https://example.com/recipes/123?lang=fi&sort=new"
+        urls = _extract_urls_from_text(text)
+        self.assertTrue(any('example.com/recipes/123' in u for u in urls))
+
+    def test_ocr_garbled_url_repaired(self):
+        """Test OCR-garbled URL (missing ://) is repaired."""
+        text = "© https /Awww.feastingathome.com/thai-coconut-soup/"
+        urls = _extract_urls_from_text(text)
+        self.assertTrue(
+            any('feastingathome.com' in u for u in urls),
+            f"Expected feastingathome.com in {urls}"
+        )
+
+    def test_ocr_garbled_url_scheme_spaces(self):
+        """Test OCR artifact: spaces in scheme."""
+        text = "Check http ://www.example.com/recipe"
+        urls = _extract_urls_from_text(text)
+        self.assertTrue(any('example.com' in u for u in urls))
+
+    def test_www_without_scheme(self):
+        """Test bare www. domain gets https:// prepended."""
+        text = "Go to www.recipes.fi/page for more"
+        urls = _extract_urls_from_text(text)
+        self.assertTrue(any('https://www.recipes.fi' in u for u in urls))
+
+    def test_empty_text_returns_empty(self):
+        """Test empty text returns empty list."""
+        self.assertEqual(_extract_urls_from_text(''), [])
+
+    def test_none_text_returns_empty(self):
+        """Test None text returns empty list."""
+        self.assertEqual(_extract_urls_from_text(None), [])
+
+    def test_no_urls_in_text(self):
+        """Test text without URLs returns empty list."""
+        self.assertEqual(
+            _extract_urls_from_text('This is a recipe for chocolate cake.'),
+            []
+        )
+
+    def test_url_trailing_punctuation_stripped(self):
+        """Test trailing punctuation is stripped from URLs."""
+        text = "Recipe at https://site.com/recipe."
+        urls = _extract_urls_from_text(text)
+        # URL should not end with period
+        for u in urls:
+            self.assertFalse(u.endswith('.'), f"URL ends with period: {u}")
+
+    def test_chinese_text_with_url(self):
+        """Test URL extraction from Chinese text."""
+        text = "食谱链接: https://example.cn/recipe/宫保鸡丁 请查看"
+        urls = _extract_urls_from_text(text)
+        self.assertTrue(any('example.cn' in u for u in urls))
+
+    def test_arabic_text_with_url(self):
+        """Test URL extraction from Arabic text."""
+        text = "الرابط https://example.com/المندي اطبخ"
+        urls = _extract_urls_from_text(text)
+        self.assertTrue(any('example.com' in u for u in urls))
+
+    def test_very_short_urls_filtered_out(self):
+        """Test that very short URL fragments are filtered out."""
+        text = "http://a.b"
+        urls = _extract_urls_from_text(text)
+        # Should be filtered: length <= 10
+        self.assertEqual(len(urls), 0)
+
+
+class RepairOCRUrlTest(TestCase):
+    """Test _repair_ocr_url with various OCR artifacts."""
+
+    def test_missing_colon_slash(self):
+        """Test repair of missing :// separator."""
+        result = _repair_ocr_url("https //www.example.com/recipe")
+        self.assertTrue(result.startswith('https://'))
+        self.assertIn('example.com', result)
+
+    def test_uppercase_a_before_www(self):
+        """Test repair of OCR artifact: capital letter before www."""
+        result = _repair_ocr_url("https://Awww.example.com/page")
+        self.assertIn('www.example.com', result)
+        self.assertNotIn('Awww', result)
+
+    def test_spaces_in_url(self):
+        """Test spaces inside URL are removed."""
+        result = _repair_ocr_url("https :// www.example.com /recipe")
+        self.assertNotIn(' ', result)
+        self.assertIn('example.com/recipe', result)
+
+    def test_backslash_in_scheme(self):
+        """Test backslash in scheme is handled."""
+        result = _repair_ocr_url("https:\\\\www.example.com\\page")
+        self.assertTrue(result.startswith('https://'))
+
+    def test_none_input(self):
+        """Test None input returns None."""
+        self.assertIsNone(_repair_ocr_url(None))
+
+    def test_empty_string(self):
+        """Test empty string returns None."""
+        self.assertIsNone(_repair_ocr_url(''))
+
+    def test_unrepairable_garbage(self):
+        """Test truly unrepairable text returns None."""
+        self.assertIsNone(_repair_ocr_url('just random text'))
+
+    def test_leading_garbage_removed(self):
+        """Test leading non-URL characters before https are removed."""
+        result = _repair_ocr_url("© https://www.example.com/page")
+        self.assertTrue(result.startswith('https://'))
+
+    def test_combined_ocr_artifacts(self):
+        """Test repair with multiple OCR artifacts combined."""
+        result = _repair_ocr_url("https /Awww.feastingathome.com/recipe/")
+        self.assertIsNotNone(result)
+        self.assertIn('feastingathome.com', result)
+        self.assertTrue(result.startswith('https://'))
+
+
+# ============= Clean HTML Text Tests =============
+
+class CleanHTMLTextTest(TestCase):
+    """Test _clean_html_text helper."""
+
+    def test_strips_html_tags(self):
+        """Test HTML tags are removed."""
+        self.assertEqual(_clean_html_text('<b>Bold</b> text'), 'Bold text')
+
+    def test_decodes_entities(self):
+        """Test common HTML entities are decoded."""
+        self.assertEqual(_clean_html_text('fish &amp; chips'), 'fish & chips')
+        self.assertEqual(_clean_html_text('&lt;tag&gt;'), '<tag>')
+
+    def test_collapses_whitespace(self):
+        """Test multiple whitespace is collapsed."""
+        result = _clean_html_text('  hello   world  ')
+        self.assertEqual(result, 'hello world')
+
+    def test_empty_input(self):
+        """Test empty input returns empty string."""
+        self.assertEqual(_clean_html_text(''), '')
+        self.assertEqual(_clean_html_text(None), '')
+
+    def test_chinese_html(self):
+        """Test Chinese text with HTML tags."""
+        self.assertEqual(_clean_html_text('<p>你好世界</p>'), '你好世界')
+
+    def test_arabic_html(self):
+        """Test Arabic text with HTML tags."""
+        self.assertEqual(_clean_html_text('<span>مرحبا بالعالم</span>'), 'مرحبا بالعالم')
+
+    def test_nested_tags(self):
+        """Test nested HTML tags stripped."""
+        result = _clean_html_text('<div><p><strong>Recipe</strong></p></div>')
+        self.assertEqual(result, 'Recipe')
+
+
+# ============= JSON-LD Extraction Tests =============
+
+class ExtractJsonLDRecipeTest(TestCase):
+    """Test _extract_jsonld_recipe with various JSON-LD formats."""
+
+    SAMPLE_RECIPE_JSONLD = '''
+    <html><head>
+    <script type="application/ld+json">
+    {
+        "@type": "Recipe",
+        "name": "Test Recipe",
+        "description": "A simple test recipe",
+        "recipeIngredient": ["2 cups flour", "1 tsp salt"],
+        "recipeInstructions": [
+            {"@type": "HowToStep", "text": "Mix flour and salt."},
+            {"@type": "HowToStep", "text": "Add water and knead."}
+        ],
+        "author": {"@type": "Person", "name": "Test Chef"},
+        "recipeCategory": "Bread",
+        "recipeCuisine": "Italian",
+        "image": "https://example.com/image.jpg"
+    }
+    </script></head><body></body></html>
+    '''
+
+    def test_basic_recipe_extraction(self):
+        """Test basic JSON-LD recipe extraction."""
+        result = _extract_jsonld_recipe(self.SAMPLE_RECIPE_JSONLD)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['title'], 'Test Recipe')
+        self.assertEqual(result['description'], 'A simple test recipe')
+
+    def test_ingredients_extracted(self):
+        """Test ingredients are parsed from JSON-LD."""
+        result = _extract_jsonld_recipe(self.SAMPLE_RECIPE_JSONLD)
+        self.assertEqual(len(result['ingredients']), 2)
+        # First ingredient: "2 cups flour" → quantity="2", name="cups flour"
+        self.assertTrue(any('flour' in str(i['name']).lower() for i in result['ingredients']))
+
+    def test_instructions_extracted(self):
+        """Test instructions are parsed from HowToStep objects."""
+        result = _extract_jsonld_recipe(self.SAMPLE_RECIPE_JSONLD)
+        self.assertIn('Mix flour and salt', result['instructions'])
+        self.assertIn('Add water and knead', result['instructions'])
+
+    def test_author_extracted(self):
+        """Test author name is extracted."""
+        result = _extract_jsonld_recipe(self.SAMPLE_RECIPE_JSONLD)
+        self.assertIn('Test Chef', result['authors'])
+
+    def test_genres_extracted(self):
+        """Test categories and cuisines become genres."""
+        result = _extract_jsonld_recipe(self.SAMPLE_RECIPE_JSONLD)
+        self.assertIn('Bread', result['genres'])
+        self.assertIn('Italian', result['genres'])
+
+    def test_image_extracted(self):
+        """Test image URL is extracted."""
+        result = _extract_jsonld_recipe(self.SAMPLE_RECIPE_JSONLD)
+        self.assertEqual(result['image_url'], 'https://example.com/image.jpg')
+
+    def test_no_recipe_returns_none(self):
+        """Test HTML without JSON-LD returns None."""
+        html = '<html><body><p>No recipe here</p></body></html>'
+        self.assertIsNone(_extract_jsonld_recipe(html))
+
+    def test_non_recipe_jsonld_skipped(self):
+        """Test non-Recipe JSON-LD types are skipped."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Article", "name": "News Article"}
+        </script></html>
+        '''
+        self.assertIsNone(_extract_jsonld_recipe(html))
+
+    def test_graph_format(self):
+        """Test JSON-LD @graph array format."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@graph": [
+            {"@type": "WebPage", "name": "Page"},
+            {"@type": "Recipe", "name": "Graph Recipe",
+             "recipeIngredient": ["1 cup sugar"]}
+        ]}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['title'], 'Graph Recipe')
+
+    def test_recipe_type_as_list(self):
+        """Test @type specified as list ["Recipe"]."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": ["Recipe"], "name": "List Type Recipe",
+         "recipeIngredient": ["water"]}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['title'], 'List Type Recipe')
+
+    def test_malformed_json_skipped(self):
+        """Test malformed JSON doesn't crash."""
+        html = '<html><script type="application/ld+json">{not valid json</script></html>'
+        result = _extract_jsonld_recipe(html)
+        self.assertIsNone(result)
+
+    def test_chinese_recipe_jsonld(self):
+        """Test JSON-LD with Chinese text."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "宫保鸡丁",
+         "description": "经典川菜",
+         "recipeIngredient": ["两杯 鸡肉", "一勺 花生"],
+         "author": {"name": "张三"}}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertEqual(result['title'], '宫保鸡丁')
+        self.assertIn('张三', result['authors'])
+
+    def test_arabic_recipe_jsonld(self):
+        """Test JSON-LD with Arabic text."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "المندي",
+         "description": "طبق يمني شهير",
+         "recipeIngredient": ["كوبان دقيق"],
+         "author": {"name": "محمد"}}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertEqual(result['title'], 'المندي')
+        self.assertIn('محمد', result['authors'])
+
+    def test_instructions_as_plain_strings(self):
+        """Test instructions as list of plain strings."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "Simple",
+         "recipeInstructions": ["Step one.", "Step two."]}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertIn('Step one', result['instructions'])
+
+    def test_instructions_as_single_string(self):
+        """Test instructions as a single string."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "Single",
+         "recipeInstructions": "Mix everything together and bake."}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertIn('Mix everything', result['instructions'])
+
+    def test_image_as_list(self):
+        """Test image field as list of URLs."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "Img",
+         "image": ["https://a.com/1.jpg", "https://a.com/2.jpg"]}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertEqual(result['image_url'], 'https://a.com/1.jpg')
+
+    def test_image_as_object(self):
+        """Test image field as ImageObject."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "Img",
+         "image": {"@type": "ImageObject", "url": "https://a.com/photo.jpg"}}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertEqual(result['image_url'], 'https://a.com/photo.jpg')
+
+    def test_multiple_authors(self):
+        """Test multiple authors extracted."""
+        html = '''
+        <html><script type="application/ld+json">
+        {"@type": "Recipe", "name": "Multi",
+         "author": [
+            {"@type": "Person", "name": "Alice"},
+            {"@type": "Person", "name": "Bob"}
+         ]}
+        </script></html>
+        '''
+        result = _extract_jsonld_recipe(html)
+        self.assertEqual(len(result['authors']), 2)
+        self.assertIn('Alice', result['authors'])
+        self.assertIn('Bob', result['authors'])
+
+
+# ============= Merge Recipe Data Tests =============
+
+class MergeRecipeDataTest(TestCase):
+    """Test _merge_recipe_data for conflict detection."""
+
+    def test_empty_existing_all_auto_updated(self):
+        """Test all fields auto-updated when existing is empty."""
+        existing = {'title': '', 'instructions': '', 'ingredients': [], 'authors': []}
+        new = {'title': 'New Title', 'instructions': 'Step 1', 'ingredients': ['flour'],
+               'authors': ['Chef']}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertIn('title', auto)
+        self.assertIn('instructions', auto)
+        self.assertEqual(len(conflicts), 0)
+
+    def test_same_data_no_conflicts(self):
+        """Test identical data produces no conflicts or auto-updates."""
+        data = {'title': 'Same', 'instructions': 'Same', 'ingredients': [], 'authors': []}
+        auto, conflicts = _merge_recipe_data(data, data)
+        self.assertEqual(len(auto), 0)
+        self.assertEqual(len(conflicts), 0)
+
+    def test_different_title_creates_conflict(self):
+        """Test different titles create a conflict."""
+        existing = {'title': 'Old Title', 'instructions': ''}
+        new = {'title': 'New Title', 'instructions': ''}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertIn('title', conflicts)
+        self.assertEqual(conflicts['title']['existing'], 'Old Title')
+        self.assertEqual(conflicts['title']['new'], 'New Title')
+
+    def test_new_data_empty_no_updates(self):
+        """Test empty new data causes no updates."""
+        existing = {'title': 'Existing', 'instructions': 'Steps'}
+        new = {'title': '', 'instructions': ''}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertEqual(len(auto), 0)
+        self.assertEqual(len(conflicts), 0)
+
+    def test_mixed_auto_and_conflicts(self):
+        """Test some fields auto-update and others conflict."""
+        existing = {'title': 'Recipe A', 'instructions': '', 'source_url': ''}
+        new = {'title': 'Recipe B', 'instructions': 'New steps', 'source_url': 'https://a.com'}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertIn('title', conflicts)      # both have values
+        self.assertIn('instructions', auto)     # existing is empty
+        self.assertIn('source_url', auto)       # existing is empty
+
+    def test_list_fields_compared(self):
+        """Test list fields (ingredients, authors, genres) compared."""
+        existing = {'ingredients': ['flour', 'sugar'], 'authors': [], 'genres': []}
+        new = {'ingredients': ['flour', 'butter'], 'authors': ['Chef'], 'genres': []}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertIn('ingredients', conflicts)
+        self.assertIn('authors', auto)
+
+    def test_chinese_data_merge(self):
+        """Test merge with Chinese text data."""
+        existing = {'title': '宫保鸡丁', 'instructions': ''}
+        new = {'title': '宫保鸡丁', 'instructions': '先炒鸡肉'}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertIn('instructions', auto)
+        self.assertEqual(len(conflicts), 0)
+
+    def test_arabic_data_merge(self):
+        """Test merge with Arabic text data."""
+        existing = {'title': 'المندي', 'instructions': 'الخطوة الأولى'}
+        new = {'title': 'المندي', 'instructions': 'الطريقة الجديدة'}
+        auto, conflicts = _merge_recipe_data(existing, new)
+        self.assertIn('instructions', conflicts)
+
+
+# ============= Combine OCR and URL Data Tests =============
+
+class CombineOCRAndURLDataTest(TestCase):
+    """Test _combine_ocr_and_url_data merging."""
+
+    def test_both_none_returns_none(self):
+        """Test both None returns None."""
+        self.assertIsNone(_combine_ocr_and_url_data(None, None))
+
+    def test_only_ocr_data(self):
+        """Test only OCR data returns OCR data."""
+        ocr = {'title': 'OCR Title', 'instructions': 'OCR steps'}
+        result = _combine_ocr_and_url_data(ocr, None)
+        self.assertEqual(result['title'], 'OCR Title')
+
+    def test_only_url_data(self):
+        """Test only URL data returns URL data."""
+        url = {'title': 'URL Title', 'instructions': 'URL steps', 'success': True}
+        result = _combine_ocr_and_url_data(None, url)
+        self.assertEqual(result['title'], 'URL Title')
+
+    def test_url_data_preferred(self):
+        """Test URL data is preferred over OCR data."""
+        ocr = {'title': 'OCR Title', 'instructions': ''}
+        url = {'title': 'URL Title', 'instructions': 'URL steps', 'success': True}
+        result = _combine_ocr_and_url_data(ocr, url)
+        self.assertEqual(result['title'], 'URL Title')
+        self.assertEqual(result['instructions'], 'URL steps')
+
+    def test_ocr_fallback_when_url_empty(self):
+        """Test OCR data used as fallback when URL field is empty."""
+        ocr = {'title': 'OCR Title', 'instructions': 'OCR steps'}
+        url = {'title': '', 'instructions': 'URL steps', 'success': True}
+        result = _combine_ocr_and_url_data(ocr, url)
+        self.assertEqual(result['title'], 'OCR Title')
+        self.assertEqual(result['instructions'], 'URL steps')
+
+    def test_unsuccessful_url_data_ignored(self):
+        """Test URL data with success=False is ignored."""
+        ocr = {'title': 'OCR Title', 'instructions': 'OCR steps'}
+        url = {'title': 'URL Title', 'success': False}
+        result = _combine_ocr_and_url_data(ocr, url)
+        self.assertEqual(result['title'], 'OCR Title')
+
+
+# ============= Find Existing Recipe Tests =============
+
+class FindExistingRecipeTest(TestCase):
+    """Test _find_existing_recipe_by_url and _find_existing_recipe_by_title."""
+
+    def setUp(self):
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'password')
+        self.recipe = Recipe.objects.create(
+            title='Test Recipe', instructions='Test', created_by=self.user
+        )
+
+    def test_find_by_url(self):
+        """Test finding recipe by URL."""
+        RecipeURL.objects.create(
+            recipe=self.recipe, url='https://example.com/recipe', is_primary=True
+        )
+        found = _find_existing_recipe_by_url('https://example.com/recipe')
+        self.assertEqual(found.pk, self.recipe.pk)
+
+    def test_find_by_url_not_found(self):
+        """Test finding recipe by non-existent URL."""
+        found = _find_existing_recipe_by_url('https://nonexistent.com/recipe')
+        self.assertIsNone(found)
+
+    def test_find_by_title(self):
+        """Test finding recipe by title (case-insensitive)."""
+        found = _find_existing_recipe_by_title('test recipe')
+        self.assertEqual(found.pk, self.recipe.pk)
+
+    def test_find_by_title_case_insensitive(self):
+        """Test title search is case-insensitive."""
+        found = _find_existing_recipe_by_title('TEST RECIPE')
+        self.assertEqual(found.pk, self.recipe.pk)
+
+    def test_find_by_title_not_found(self):
+        """Test finding recipe by non-existent title."""
+        found = _find_existing_recipe_by_title('Nonexistent Recipe')
+        self.assertIsNone(found)
+
+    def test_find_by_empty_title(self):
+        """Test empty title returns None."""
+        self.assertIsNone(_find_existing_recipe_by_title(''))
+        self.assertIsNone(_find_existing_recipe_by_title(None))
+
+    def test_find_by_chinese_title(self):
+        """Test finding recipe by Chinese title."""
+        recipe = Recipe.objects.create(
+            title='宫保鸡丁', instructions='Test', created_by=self.user
+        )
+        found = _find_existing_recipe_by_title('宫保鸡丁')
+        self.assertEqual(found.pk, recipe.pk)
+
+    def test_find_by_arabic_title(self):
+        """Test finding recipe by Arabic title."""
+        recipe = Recipe.objects.create(
+            title='المندي', instructions='Test', created_by=self.user
+        )
+        found = _find_existing_recipe_by_title('المندي')
+        self.assertEqual(found.pk, recipe.pk)
+
+
+# ============= Get Existing Recipe Data Tests =============
+
+class GetExistingRecipeDataTest(TestCase):
+    """Test _get_existing_recipe_data."""
+
+    def setUp(self):
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'password')
+        self.recipe = Recipe.objects.create(
+            title='Full Recipe',
+            instructions='Mix and bake',
+            created_by=self.user
+        )
+
+    def test_basic_fields(self):
+        """Test title and instructions are returned."""
+        data = _get_existing_recipe_data(self.recipe)
+        self.assertEqual(data['title'], 'Full Recipe')
+        self.assertEqual(data['instructions'], 'Mix and bake')
+
+    def test_ingredients_included(self):
+        """Test ingredients are formatted as text list."""
+        ingredient = Ingredient.objects.create(name='flour')
+        RecipeIngredient.objects.create(
+            recipe=self.recipe, ingredient=ingredient,
+            quantity='2 cups', order=0
+        )
+        data = _get_existing_recipe_data(self.recipe)
+        self.assertIn('2 cups - flour', data['ingredients'])
+
+    def test_authors_included(self):
+        """Test authors are returned as string list."""
+        author = Author.objects.create(first_name='Julia', last_name='Child')
+        self.recipe.authors.add(author)
+        data = _get_existing_recipe_data(self.recipe)
+        self.assertTrue(any('Julia' in a for a in data['authors']))
+
+    def test_genres_included(self):
+        """Test genres are returned."""
+        genre = Genre.objects.create(name='Italian')
+        self.recipe.genres.add(genre)
+        data = _get_existing_recipe_data(self.recipe)
+        self.assertIn('Italian', data['genres'])
+
+    def test_source_url_included(self):
+        """Test primary URL is returned."""
+        RecipeURL.objects.create(
+            recipe=self.recipe, url='https://example.com', is_primary=True
+        )
+        data = _get_existing_recipe_data(self.recipe)
+        self.assertEqual(data['source_url'], 'https://example.com')
+
+
+# ============= Create Recipe From Data Tests =============
+
+class CreateRecipeFromDataTest(TestCase):
+    """Test _create_recipe_from_data."""
+
+    def setUp(self):
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'password')
+
+    def test_basic_creation(self):
+        """Test basic recipe creation from data dict."""
+        data = {
+            'title': 'New Recipe',
+            'instructions': 'Step 1: Cook.',
+            'ingredients': [{'name': 'flour', 'quantity': '2 cups', 'order': 0}],
+            'authors': ['Test Chef'],
+            'genres': ['Italian'],
+            'source_url': 'https://example.com',
+        }
+        recipe = _create_recipe_from_data(data, self.user)
+        self.assertEqual(recipe.title, 'New Recipe')
+        self.assertEqual(recipe.instructions, 'Step 1: Cook.')
+        self.assertEqual(recipe.created_by, self.user)
+        self.assertTrue(recipe.authors.exists())
+        self.assertTrue(recipe.genres.exists())
+        self.assertTrue(RecipeURL.objects.filter(recipe=recipe).exists())
+
+    def test_creation_with_empty_instructions_uses_description(self):
+        """Test description is used when instructions are empty."""
+        data = {
+            'title': 'Desc Recipe',
+            'instructions': '',
+            'description': 'A delicious recipe for testing.',
+        }
+        recipe = _create_recipe_from_data(data, self.user)
+        self.assertEqual(recipe.instructions, 'A delicious recipe for testing.')
+
+    def test_creation_with_no_instructions_fallback(self):
+        """Test fallback text when both instructions and description empty."""
+        data = {'title': 'Empty Recipe'}
+        recipe = _create_recipe_from_data(data, self.user)
+        self.assertEqual(recipe.instructions, 'No instructions available.')
+
+    def test_chinese_recipe_creation(self):
+        """Test creating recipe with Chinese content."""
+        data = {
+            'title': '宫保鸡丁',
+            'instructions': '先炒鸡肉，然后加入花生',
+            'authors': ['张三'],
+            'genres': ['中式料理'],
+        }
+        recipe = _create_recipe_from_data(data, self.user)
+        self.assertEqual(recipe.title, '宫保鸡丁')
+
+    def test_arabic_recipe_creation(self):
+        """Test creating recipe with Arabic content."""
+        data = {
+            'title': 'المندي',
+            'instructions': 'طريقة تحضير المندي',
+            'authors': ['محمد'],
+        }
+        recipe = _create_recipe_from_data(data, self.user)
+        self.assertEqual(recipe.title, 'المندي')
+
+    def test_ingredients_saved(self):
+        """Test ingredients from data are saved to recipe."""
+        data = {
+            'title': 'Ing Recipe',
+            'instructions': 'Cook',
+            'ingredients': [
+                {'name': 'flour', 'quantity': '2 cups', 'order': 0},
+                {'name': 'sugar', 'quantity': '1 cup', 'order': 1},
+            ],
+        }
+        recipe = _create_recipe_from_data(data, self.user)
+        ris = RecipeIngredient.objects.filter(recipe=recipe)
+        self.assertEqual(ris.count(), 2)
+
+    def test_very_long_title_truncated(self):
+        """Test very long title is truncated."""
+        data = {'title': 'T' * 1000, 'instructions': 'Test'}
+        recipe = _create_recipe_from_data(data, self.user)
+        self.assertLessEqual(len(recipe.title), MAX_TITLE_LENGTH)
+
+
+# ============= Save Ingredients List Tests =============
+
+class SaveIngredientsListTest(TestCase):
+    """Test _save_ingredients_list."""
+
+    def setUp(self):
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'password')
+        self.recipe = Recipe.objects.create(
+            title='Test', instructions='Test', created_by=self.user
+        )
+
+    def test_save_from_dict_list(self):
+        """Test saving ingredients from list of dicts."""
+        ingredients = [
+            {'name': 'flour', 'quantity': '2 cups', 'order': 0},
+            {'name': 'salt', 'quantity': '1 tsp', 'order': 1},
+        ]
+        _save_ingredients_list(self.recipe, ingredients)
+        ris = RecipeIngredient.objects.filter(recipe=self.recipe)
+        self.assertEqual(ris.count(), 2)
+
+    def test_save_from_string_list(self):
+        """Test saving ingredients from list of strings."""
+        ingredients = ['2 cups - flour', '1 tsp - salt']
+        _save_ingredients_list(self.recipe, ingredients)
+        ris = RecipeIngredient.objects.filter(recipe=self.recipe)
+        self.assertEqual(ris.count(), 2)
+
+    def test_empty_list_no_error(self):
+        """Test empty list doesn't cause error."""
+        _save_ingredients_list(self.recipe, [])
+        self.assertEqual(RecipeIngredient.objects.filter(recipe=self.recipe).count(), 0)
+
+    def test_skip_empty_names(self):
+        """Test empty ingredient names are skipped."""
+        ingredients = [{'name': '', 'quantity': '1 cup', 'order': 0}]
+        _save_ingredients_list(self.recipe, ingredients)
+        self.assertEqual(RecipeIngredient.objects.filter(recipe=self.recipe).count(), 0)
+
+
+# ============= Add Author By Name Tests =============
+
+class AddAuthorByNameTest(TestCase):
+    """Test _add_author_by_name."""
+
+    def setUp(self):
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'password')
+        self.recipe = Recipe.objects.create(
+            title='Test', instructions='Test', created_by=self.user
+        )
+
+    def test_single_word_creates_publisher(self):
+        """Test single-word name creates publisher."""
+        _add_author_by_name(self.recipe, 'Tasty')
+        author = self.recipe.authors.first()
+        self.assertEqual(author.publisher_name, 'Tasty')
+
+    def test_two_words_creates_first_last(self):
+        """Test two-word name splits into first/last."""
+        _add_author_by_name(self.recipe, 'Julia Child')
+        author = self.recipe.authors.first()
+        self.assertEqual(author.first_name, 'Julia')
+        self.assertEqual(author.last_name, 'Child')
+
+    def test_reuses_existing_author(self):
+        """Test existing author is reused, not duplicated."""
+        Author.objects.create(publisher_name='Tasty')
+        _add_author_by_name(self.recipe, 'Tasty')
+        self.assertEqual(Author.objects.filter(publisher_name='Tasty').count(), 1)
+
+    def test_empty_name_skipped(self):
+        """Test empty name doesn't create author."""
+        _add_author_by_name(self.recipe, '')
+        self.assertEqual(self.recipe.authors.count(), 0)
+
+    def test_chinese_author(self):
+        """Test Chinese author name."""
+        _add_author_by_name(self.recipe, '张 伟')
+        author = self.recipe.authors.first()
+        self.assertIsNotNone(author)
+
+    def test_arabic_author(self):
+        """Test Arabic author name."""
+        _add_author_by_name(self.recipe, 'محمد')
+        author = self.recipe.authors.first()
+        self.assertEqual(author.publisher_name, 'محمد')
+
+
+# ============= Serialize Functions Tests =============
+
+class SerializeTest(TestCase):
+    """Test _serialize_conflicts and _serialize_new_data."""
+
+    def test_serialize_conflicts_text(self):
+        """Test serializing text conflicts."""
+        conflicts = {
+            'title': {'existing': 'Old', 'new': 'New'},
+        }
+        result = _serialize_conflicts(conflicts)
+        self.assertEqual(result['title']['existing'], 'Old')
+        self.assertEqual(result['title']['new'], 'New')
+
+    def test_serialize_conflicts_list(self):
+        """Test serializing list conflicts (converted to str)."""
+        conflicts = {
+            'ingredients': {'existing': ['flour', 'sugar'], 'new': ['butter']},
+        }
+        result = _serialize_conflicts(conflicts)
+        self.assertIn('flour', result['ingredients']['existing'])
+
+    def test_serialize_new_data(self):
+        """Test serializing scraped data for session."""
+        data = {
+            'title': 'Test',
+            'ingredients': [{'name': 'flour', 'qty': '1 cup'}],
+            'success': True,
+            'confidence': 0.85,
+        }
+        result = _serialize_new_data(data)
+        self.assertEqual(result['title'], 'Test')
+        self.assertEqual(result['confidence'], 0.85)
+        self.assertTrue(result['success'])
+
+    def test_serialize_chinese_text(self):
+        """Test serializing Chinese text."""
+        data = {'title': '宫保鸡丁', 'instructions': '先炒鸡肉'}
+        result = _serialize_new_data(data)
+        self.assertEqual(result['title'], '宫保鸡丁')
+
+    def test_serialize_arabic_text(self):
+        """Test serializing Arabic text."""
+        data = {'title': 'المندي', 'instructions': 'طريقة التحضير'}
+        result = _serialize_new_data(data)
+        self.assertEqual(result['title'], 'المندي')
+
+
+# ============= Scrape Recipe From URL Tests (Mocked) =============
+
+class ScrapeRecipeFromURLTest(TestCase):
+    """Test scrape_recipe_from_url with mocked HTTP responses."""
+
+    MOCK_JSONLD_HTML = '''
+    <html><head>
+    <script type="application/ld+json">
+    {"@type": "Recipe", "name": "Mocked Recipe",
+     "description": "A mocked recipe for testing",
+     "recipeIngredient": ["1 cup flour", "2 eggs"],
+     "recipeInstructions": [{"text": "Mix."}],
+     "author": {"name": "Mock Chef"},
+     "recipeCategory": "Dessert",
+     "image": "https://example.com/photo.jpg"}
+    </script>
+    </head><body></body></html>
+    '''
+
+    MOCK_PLAIN_HTML = '''
+    <html><head>
+    <title>Plain Page Title</title>
+    <meta property="og:title" content="OG Title" />
+    <meta name="description" content="A plain page description" />
+    <meta name="author" content="Plain Author" />
+    </head><body><p>Some content</p></body></html>
+    '''
+
+    @patch('RecipeDB.views.urllib.request.urlopen')
+    def test_jsonld_scraping(self, mock_urlopen):
+        """Test scraping a page with JSON-LD Recipe data."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = self.MOCK_JSONLD_HTML.encode('utf-8')
+        mock_response.headers = {'Content-Type': 'text/html; charset=utf-8'}
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        result = scrape_recipe_from_url('https://example.com/recipe')
+        self.assertTrue(result['success'])
+        self.assertEqual(result['title'], 'Mocked Recipe')
+        self.assertEqual(len(result['ingredients']), 2)
+        self.assertIn('Mock Chef', result['authors'])
+        self.assertIn('Dessert', result['genres'])
+
+    @patch('RecipeDB.views.urllib.request.urlopen')
+    def test_fallback_scraping(self, mock_urlopen):
+        """Test scraping a page without JSON-LD falls back to meta tags."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = self.MOCK_PLAIN_HTML.encode('utf-8')
+        mock_response.headers = {'Content-Type': 'text/html; charset=utf-8'}
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        result = scrape_recipe_from_url('https://example.com/page')
+        # Should have at least a title from meta/og tags
+        self.assertTrue(result.get('title'))
+
+    @patch('RecipeDB.views.urllib.request.urlopen')
+    def test_http_error_handled(self, mock_urlopen):
+        """Test HTTP error is handled gracefully."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'https://example.com', 404, 'Not Found', {}, None
+        )
+        result = scrape_recipe_from_url('https://example.com/missing')
+        self.assertFalse(result['success'])
+        self.assertIn('404', result['error'])
+
+    @patch('RecipeDB.views.urllib.request.urlopen')
+    def test_url_error_handled(self, mock_urlopen):
+        """Test URL/connection error is handled gracefully."""
+        mock_urlopen.side_effect = urllib.error.URLError('Connection refused')
+        result = scrape_recipe_from_url('https://unreachable.invalid/')
+        self.assertFalse(result['success'])
+        self.assertIn('URL error', result['error'])
+
+    @patch('RecipeDB.views.urllib.request.urlopen')
+    def test_empty_response_handled(self, mock_urlopen):
+        """Test empty response is handled gracefully."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = b''
+        mock_response.headers = {'Content-Type': 'text/html'}
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        result = scrape_recipe_from_url('https://example.com/empty')
+        self.assertFalse(result['success'])
+
+    @patch('RecipeDB.views.urllib.request.urlopen')
+    def test_source_url_preserved(self, mock_urlopen):
+        """Test source URL is preserved in result."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = self.MOCK_JSONLD_HTML.encode('utf-8')
+        mock_response.headers = {'Content-Type': 'text/html; charset=utf-8'}
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        result = scrape_recipe_from_url('https://example.com/my-recipe')
+        self.assertEqual(result['source_url'], 'https://example.com/my-recipe')
+
+
+# ============= OCR Upload Form Tests =============
+
+class OCRUploadFormTest(TestCase):
+    """Test OCRUploadForm validation."""
+
+    def test_form_valid_with_url_only(self):
+        """Test form is valid with only recipe_url."""
+        form = OCRUploadForm(data={
+            'recipe_url': 'https://example.com/recipe',
+            'auto_search_web': False,
+        })
+        self.assertTrue(form.is_valid())
+
+    def test_form_invalid_with_nothing(self):
+        """Test form is invalid without image or URL."""
+        form = OCRUploadForm(data={
+            'recipe_url': '',
+            'auto_search_web': False,
+        })
+        self.assertFalse(form.is_valid())
+
+    def test_form_invalid_url_format(self):
+        """Test form rejects invalid URL format."""
+        form = OCRUploadForm(data={
+            'recipe_url': 'not-a-valid-url',
+            'auto_search_web': False,
+        })
+        self.assertFalse(form.is_valid())
+
+    def test_form_valid_with_image_only(self):
+        """Test form is valid with only image file."""
+        # Create a minimal valid image file in memory
+        from io import BytesIO
+        from PIL import Image as PILImage
+        img_io = BytesIO()
+        img = PILImage.new('RGB', (10, 10), color='red')
+        img.save(img_io, format='PNG')
+        img_io.seek(0)
+
+        image = SimpleUploadedFile('test.png', img_io.read(), content_type='image/png')
+        form = OCRUploadForm(
+            data={'recipe_url': '', 'auto_search_web': False},
+            files={'image_file': image}
+        )
+        self.assertTrue(form.is_valid())
+
+    def test_form_valid_with_both(self):
+        """Test form is valid with both image and URL."""
+        from io import BytesIO
+        from PIL import Image as PILImage
+        img_io = BytesIO()
+        img = PILImage.new('RGB', (10, 10), color='blue')
+        img.save(img_io, format='PNG')
+        img_io.seek(0)
+
+        image = SimpleUploadedFile('test.png', img_io.read(), content_type='image/png')
+        form = OCRUploadForm(
+            data={'recipe_url': 'https://example.com/recipe', 'auto_search_web': True},
+            files={'image_file': image}
+        )
+        self.assertTrue(form.is_valid())
+
+
+# ============= OCR Upload View URL Scraping Tests =============
+
+class OCRUploadURLScrapingViewTest(TestCase):
+    """Test OCR upload view with URL-only scraping."""
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'testpass123')
+        self.client.login(username='testuser', password='testpass123')
+
+    @patch('RecipeDB.views.scrape_recipe_from_url')
+    def test_url_only_creates_recipe(self, mock_scrape):
+        """Test URL-only submission creates a new recipe."""
+        mock_scrape.return_value = {
+            'title': 'Scraped Recipe',
+            'instructions': 'Step 1: Cook.',
+            'ingredients': [{'name': 'flour', 'quantity': '1 cup', 'order': 0}],
+            'authors': ['Web Chef'],
+            'genres': ['Italian'],
+            'image_url': '',
+            'source_url': 'https://example.com/recipe',
+            'description': 'A test recipe',
+            'success': True,
+            'error': '',
+        }
+
+        response = self.client.post(reverse('ocr_upload'), {
+            'recipe_url': 'https://example.com/recipe',
+            'auto_search_web': False,
+        })
+        self.assertEqual(response.status_code, 302)
+        recipe = Recipe.objects.get(title='Scraped Recipe')
+        self.assertEqual(recipe.created_by, self.user)
+
+    @patch('RecipeDB.views.scrape_recipe_from_url')
+    def test_url_scrape_failure_shows_error(self, mock_scrape):
+        """Test URL scrape failure shows error message."""
+        mock_scrape.return_value = {
+            'title': '',
+            'instructions': '',
+            'ingredients': [],
+            'authors': [],
+            'genres': [],
+            'image_url': '',
+            'source_url': 'https://example.com/missing',
+            'description': '',
+            'success': False,
+            'error': 'HTTP error 404',
+        }
+
+        response = self.client.post(reverse('ocr_upload'), {
+            'recipe_url': 'https://example.com/missing',
+            'auto_search_web': False,
+        })
+        # Should re-render form with error
+        self.assertEqual(response.status_code, 200)
+
+    @patch('RecipeDB.views.scrape_recipe_from_url')
+    def test_url_matching_existing_recipe_merges(self, mock_scrape):
+        """Test URL scraping that matches existing recipe triggers merge flow."""
+        # Create existing recipe with a URL
+        recipe = Recipe.objects.create(
+            title='Existing Recipe',
+            instructions='Old instructions',
+            created_by=self.user,
+        )
+        RecipeURL.objects.create(
+            recipe=recipe, url='https://example.com/recipe', is_primary=True
+        )
+
+        mock_scrape.return_value = {
+            'title': 'Existing Recipe',
+            'instructions': 'New instructions from URL',
+            'ingredients': [],
+            'authors': [],
+            'genres': [],
+            'image_url': '',
+            'source_url': 'https://example.com/recipe',
+            'description': '',
+            'success': True,
+            'error': '',
+        }
+
+        response = self.client.post(reverse('ocr_upload'), {
+            'recipe_url': 'https://example.com/recipe',
+            'auto_search_web': False,
+        })
+        # Should redirect to merge confirm since instructions conflict
+        self.assertEqual(response.status_code, 302)
+
+
+# ============= Recipe Merge Confirm View Tests =============
+
+class RecipeMergeConfirmViewTest(TestCase):
+    """Test recipe_merge_confirm view."""
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user('testuser', 'test@test.com', 'testpass123')
+        self.client.login(username='testuser', password='testpass123')
+        self.recipe = Recipe.objects.create(
+            title='Merge Test Recipe',
+            instructions='Old instructions',
+            created_by=self.user,
+        )
+
+    def test_get_merge_page_with_session_data(self):
+        """Test GET merge confirm page renders with session data."""
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'instructions': {'existing': 'Old instructions', 'new': 'New instructions'},
+        }
+        session['merge_new_data'] = {'instructions': 'New instructions'}
+        session.save()
+
+        response = self.client.get(reverse('recipe_merge_confirm'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Old instructions')
+        self.assertContains(response, 'New instructions')
+
+    def test_get_merge_page_without_session_redirects(self):
+        """Test GET merge confirm without session data redirects."""
+        response = self.client.get(reverse('recipe_merge_confirm'))
+        self.assertEqual(response.status_code, 302)
+
+    def test_post_keep_existing(self):
+        """Test POST with 'keep' choice keeps existing data."""
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'instructions': {'existing': 'Old instructions', 'new': 'New instructions'},
+        }
+        session['merge_new_data'] = {'instructions': 'New instructions'}
+        session.save()
+
+        response = self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_instructions': 'keep',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.recipe.refresh_from_db()
+        self.assertEqual(self.recipe.instructions, 'Old instructions')
+
+    def test_post_replace_with_new(self):
+        """Test POST with 'replace' choice updates data."""
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'instructions': {'existing': 'Old instructions', 'new': 'New instructions'},
+        }
+        session['merge_new_data'] = {'instructions': 'New instructions'}
+        session.save()
+
+        response = self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_instructions': 'replace',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.recipe.refresh_from_db()
+        self.assertEqual(self.recipe.instructions, 'New instructions')
+
+    def test_post_replace_title(self):
+        """Test POST replacing title."""
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'title': {'existing': 'Merge Test Recipe', 'new': 'Updated Title'},
+        }
+        session['merge_new_data'] = {'title': 'Updated Title'}
+        session.save()
+
+        response = self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_title': 'replace',
+        })
+        self.recipe.refresh_from_db()
+        self.assertEqual(self.recipe.title, 'Updated Title')
+
+    def test_post_replace_source_url(self):
+        """Test POST replacing source URL."""
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'source_url': {'existing': 'https://old.com', 'new': 'https://new.com'},
+        }
+        session['merge_new_data'] = {'source_url': 'https://new.com'}
+        session.save()
+
+        response = self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_source_url': 'replace',
+        })
+        self.assertEqual(response.status_code, 302)
+
+    def test_session_cleared_after_merge(self):
+        """Test session keys are cleared after merge POST."""
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'instructions': {'existing': 'Old', 'new': 'New'},
+        }
+        session['merge_new_data'] = {'instructions': 'New'}
+        session.save()
+
+        self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_instructions': 'keep',
+        })
+        session = self.client.session
+        self.assertNotIn('merge_recipe_id', session)
+        self.assertNotIn('merge_conflicts', session)
+        self.assertNotIn('merge_new_data', session)
+
+    def test_merge_requires_login(self):
+        """Test merge confirm view requires authentication."""
+        self.client.logout()
+        response = self.client.get(reverse('recipe_merge_confirm'))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('login', response.url)
+
+    def test_merge_with_chinese_data(self):
+        """Test merge with Chinese text in conflicts."""
+        self.recipe.title = '旧标题'
+        self.recipe.save()
+
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'title': {'existing': '旧标题', 'new': '新标题'},
+        }
+        session['merge_new_data'] = {'title': '新标题'}
+        session.save()
+
+        response = self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_title': 'replace',
+        })
+        self.recipe.refresh_from_db()
+        self.assertEqual(self.recipe.title, '新标题')
+
+    def test_merge_with_arabic_data(self):
+        """Test merge with Arabic text in conflicts."""
+        self.recipe.title = 'العنوان القديم'
+        self.recipe.save()
+
+        session = self.client.session
+        session['merge_recipe_id'] = self.recipe.pk
+        session['merge_conflicts'] = {
+            'title': {'existing': 'العنوان القديم', 'new': 'العنوان الجديد'},
+        }
+        session['merge_new_data'] = {'title': 'العنوان الجديد'}
+        session.save()
+
+        response = self.client.post(reverse('recipe_merge_confirm'), {
+            'choice_title': 'replace',
+        })
+        self.recipe.refresh_from_db()
+        self.assertEqual(self.recipe.title, 'العنوان الجديد')

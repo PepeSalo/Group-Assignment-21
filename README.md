@@ -21,12 +21,26 @@ RecipeDB is a comprehensive web application built with Django 6.0.2 that allows 
 ### OCR & Image Processing
 - **Tesseract OCR**: Extracts recipe text (title, ingredients, instructions) from uploaded images
 - **Confidence Scoring**: Configurable threshold (default 40%) determines OCR success/failure
+- **URL Detection in Images**: OCR scans images for URLs and automatically repairs common OCR artifacts (missing `://`, extra spaces, spurious uppercase letters)
 - **Automatic File Management**:
   - **On success**: Source image is deleted from the IMAGES folder (via background thread)
   - **On failure**: Source image is renamed with `ERR_` prefix, original is deleted in background
   - Background thread retries deletion up to 30 times (2-second intervals) to handle file locks from antivirus, Windows Explorer thumbnails, or similar processes
 - **Web Search Integration**: Optionally searches DuckDuckGo for recipe URLs on successful OCR
 - **Smart Filename Matching**: Handles Django's filename sanitization (spaces → underscores) with multi-strategy matching (exact, spaces-restored, fuzzy stem matching)
+
+### URL Scraping & Web Import
+- **Recipe URL Scraping**: Paste a URL to automatically import recipe data from any web page
+- **Multi-Strategy Extraction**:
+  1. **JSON-LD** (schema.org Recipe): Structured data extraction – highest quality
+  2. **BeautifulSoup HTML Parsing**: Parses common recipe CSS classes, Open Graph, and meta tags
+  3. **Regex Fallback**: Extracts title, description, and image from meta tags without BeautifulSoup
+- **Extracted Data**: Title, instructions, ingredients (with quantities), authors, genres/categories, image URL, source URL, description
+- **Data Merge Protection**: When scraped data matches an existing recipe:
+  - Empty fields are auto-filled without user intervention
+  - Fields with conflicting data require user confirmation via a side-by-side comparison UI
+  - Users choose "Keep Existing" or "Replace with New" for each conflicting field
+- **OCR + URL Combination**: When an image contains a URL, both OCR text and URL-scraped data are combined, preferring structured URL data for ingredients and instructions
 
 ### Recipe Editing
 - **Text-Based Ingredient Entry**: Enter ingredients as `quantity - name (notes)`, one per line
@@ -91,6 +105,7 @@ RecipeDB is a comprehensive web application built with Django 6.0.2 that allows 
    - Django 6.0.2
    - Pillow 12.1.1
    - pytesseract
+   - beautifulsoup4 (for HTML parsing of recipe URLs)
 
 4. **Configure Tesseract path** (if needed)
    
@@ -148,18 +163,35 @@ RecipeDB is a comprehensive web application built with Django 6.0.2 that allows 
 
 1. Log in to your account
 2. Click "OCR Upload" in the navigation bar
-3. Place recipe images in the configured IMAGES folder (`C:\Temp\IMAGES` by default)
-4. Select a JPG or PNG image containing a recipe
-5. Optionally enable "Search web for additional information"
-6. Click "Upload and Process"
-7. The system will:
-   - Extract text using Tesseract OCR
-   - Parse recipe components (title, ingredients, instructions)
-   - Calculate confidence score
-   - Create recipe automatically if confidence ≥ 40%
+3. Choose one or both input methods:
+   - **Image upload**: Select a JPG or PNG image containing a recipe
+   - **Recipe URL**: Paste a URL to a recipe web page
+4. Optionally enable "Search web for additional information"
+5. Click "Upload and Process"
+6. The system will:
+   - Extract text using Tesseract OCR (if image provided)
+   - Detect and repair URLs found in the OCR text
+   - Scrape recipe data from the provided or detected URL
+   - Combine OCR and URL data (structured URL data preferred)
+   - Check for existing recipes by URL or title
+   - **If no match**: Create a new recipe automatically
+   - **If match found**: Auto-fill empty fields, then show merge confirmation for conflicting fields
    - On success: delete original image from IMAGES folder (background)
    - On failure: rename to `ERR_filename.png` and delete original (background)
-   - Optionally search DuckDuckGo for a recipe URL
+
+### Importing Recipes from URLs
+
+1. Log in and go to "OCR Upload"
+2. Paste a recipe URL (e.g., `https://www.feastingathome.com/kung-pao-chicken/`)
+3. Click "Upload and Process"
+4. The system extracts recipe data (title, ingredients, instructions, author, etc.)
+5. If the recipe already exists, you'll see a merge confirmation page
+6. Choose which fields to keep or replace, then confirm
+
+**Supported URL formats:**
+- Pages with JSON-LD structured data (most recipe blogs) – best results
+- Pages with standard HTML meta tags and Open Graph data
+- Any web page with a `<title>` tag (minimal extraction)
 
 ### Editing a Recipe
 
@@ -245,6 +277,17 @@ Test coverage includes:
 - ✅ Background file deletion (threaded)
 - ✅ File management (ERR_ rename, delete on success)
 - ✅ Error handling and edge cases
+- ✅ URL extraction from OCR text (clean, garbled, www-only)
+- ✅ OCR URL repair (missing ://, spaces, uppercase artifacts)
+- ✅ JSON-LD recipe extraction (multiple formats, @graph, list types)
+- ✅ HTML cleaning and entity decoding
+- ✅ Recipe data merging (auto-updates vs conflicts)
+- ✅ Combined OCR + URL data merging
+- ✅ Recipe creation from scraped data
+- ✅ Merge confirmation view (keep/replace per field)
+- ✅ URL scraping with mocked HTTP responses
+- ✅ OCR upload form validation (image or URL required)
+- ✅ Serialization for session storage
 
 ## Technology Stack
 
@@ -252,6 +295,8 @@ Test coverage includes:
 - **Database**: SQLite3
 - **OCR**: Tesseract 5.4.0 with pytesseract
 - **Image Processing**: Pillow 12.1.1
+- **HTML Parsing**: BeautifulSoup 4 (beautifulsoup4)
+- **Web Scraping**: JSON-LD (schema.org), Open Graph, meta tags, regex fallback
 - **Web Search**: DuckDuckGo Instant Answer API (no API key required)
 - **Frontend**: Responsive HTML5/CSS3 with vanilla JavaScript
 - **Design**: Custom CSS with CSS variables for theming (light/dark mode)
@@ -300,7 +345,8 @@ mysite/
             ├── recipe_detail.html     # Recipe details
             ├── recipe_form.html       # Create/edit recipe
             ├── recipe_confirm_delete.html
-            ├── ocr_upload.html        # OCR upload
+            ├── recipe_merge_confirm.html  # Data merge confirmation
+            ├── ocr_upload.html        # OCR upload & URL scraping
             ├── author_list.html       # Authors
             ├── ingredient_list.html   # Ingredients
             └── genre_list.html        # Genres

@@ -1,0 +1,90 @@
+{% extends 'RecipeDB/base.html' %}
+
+{% block title %}Confirm Recipe Update - RecipeDB{% endblock %}
+
+{% block content %}
+<div class="mt-3 mb-3">
+    <h1>Confirm Recipe Update</h1>
+    <p>The following fields in <strong>"{{ recipe.title }}"</strong> already have data that differs from the new data found online.
+       Please choose which version to keep for each field.</p>
+</div>
+
+<form method="post">
+    {% csrf_token %}
+
+    {% for conflict in conflicts %}
+    <div class="card mb-3">
+        <div class="card-header">
+            <strong>{{ conflict.field_label }}</strong>
+        </div>
+        <div style="padding: 1.5rem;">
+            <div class="merge-comparison" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                <!-- Existing data -->
+                <div class="merge-option">
+                    <label style="display: flex; align-items: flex-start; gap: 0.5rem; cursor: pointer;">
+                        <input type="radio"
+                               name="choice_{{ conflict.field }}"
+                               value="keep"
+                               checked
+                               style="margin-top: 0.3rem;">
+                        <div>
+                            <strong style="color: var(--info);">Keep Existing</strong>
+                            <div class="merge-preview" style="
+                                margin-top: 0.5rem;
+                                padding: 0.75rem;
+                                background: var(--bg-secondary);
+                                border: 2px solid var(--info);
+                                border-radius: 4px;
+                                max-height: 200px;
+                                overflow-y: auto;
+                                white-space: pre-wrap;
+                                word-break: break-word;
+                                font-size: 0.9rem;
+                            ">{{ conflict.existing }}</div>
+                        </div>
+                    </label>
+                </div>
+
+                <!-- New data -->
+                <div class="merge-option">
+                    <label style="display: flex; align-items: flex-start; gap: 0.5rem; cursor: pointer;">
+                        <input type="radio"
+                               name="choice_{{ conflict.field }}"
+                               value="replace"
+                               style="margin-top: 0.3rem;">
+                        <div>
+                            <strong style="color: var(--warning);">Replace with New</strong>
+                            <div class="merge-preview" style="
+                                margin-top: 0.5rem;
+                                padding: 0.75rem;
+                                background: var(--bg-secondary);
+                                border: 2px solid var(--warning);
+                                border-radius: 4px;
+                                max-height: 200px;
+                                overflow-y: auto;
+                                white-space: pre-wrap;
+                                word-break: break-word;
+                                font-size: 0.9rem;
+                            ">{{ conflict.new }}</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    <div style="margin-top: 1.5rem; display: flex; gap: 1rem;">
+        <button type="submit" class="btn btn-primary">Apply Selected Changes</button>
+        <a href="{% url 'recipe_detail' recipe.pk %}" class="btn btn-secondary">Cancel (Keep All Existing)</a>
+    </div>
+</form>
+
+<style>
+    @media (max-width: 768px) {
+        .merge-comparison {
+            grid-template-columns: 1fr !important;
+        }
+    }
+</style>
+{% endblock %}

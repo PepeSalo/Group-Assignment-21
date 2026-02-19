@@ -7,10 +7,17 @@
 - [x] ~~Add automatic file renaming with ERR_ prefix for failed OCR and deletion for successful OCR~~
 - [x] ~~Configure OCR confidence threshold (set to 40%)~~
 - [x] ~~Handle file locks from antivirus/Explorer with background thread deletion~~
+- [x] ~~URL detection in OCR images with automatic repair of OCR artifacts~~
+- [x] ~~URL scraping: import recipe data from pasted URLs (JSON-LD, BeautifulSoup, regex fallback)~~
+- [x] ~~Merge confirmation UI: keep/replace per field when scraped data conflicts with existing recipe~~
+- [x] ~~Auto-fill empty recipe fields from scraped data without user confirmation~~
+- [x] ~~Combined OCR + URL data merging (URL data preferred for structured fields)~~
 - [ ] Improve OCR text extraction with NLP for better ingredient and instruction parsing
 - [ ] Add support for handwritten recipe recognition
 - [ ] Implement batch OCR processing for multiple images
 - [ ] Add OCR language selection (currently English only)
+- [ ] Add image URL download: save scraped image_url to recipe image field
+- [ ] Improve URL scraping for non-recipe pages (news articles, blogs)
 
 ### Search & Filtering
 - [ ] Add autocomplete for search fields
@@ -65,6 +72,7 @@
 - [ ] Optimize database indexes further
 
 ### Testing
+- [x] ~~Increase test coverage with URL scraping, merge, and OCR URL detection tests (235 tests)~~
 - [ ] Increase test coverage to >90%
 - [ ] Add integration tests for OCR workflow
 - [ ] Implement end-to-end testing with Selenium
@@ -125,6 +133,7 @@
 - [x] ~~Fix Django filename sanitization (spaces → underscores) in OCR file matching~~
 - [x] ~~Fix recipe delete/edit permissions (any logged-in user could delete)~~ — now requires ownership or Django permission
 - [x] ~~Fix recipe form field order (instructions was above ingredients)~~
+- [x] ~~Fix trailing punctuation not stripped from OCR-detected URLs~~
 - [ ] Fix potential race conditions in rating updates
 - [ ] Improve error messages for failed file uploads
 - [ ] Add validation for image file sizes
@@ -166,6 +175,8 @@
 4. Large image uploads may timeout
 5. Search results could be slow with large databases
 6. Background file deletion may take up to 60 seconds if file is locked by external process
+7. OCR URL repair may not fix all OCR artifacts (e.g., character substitutions in domain names)
+8. URL scraping depends on page structure; non-standard recipe pages may yield minimal data
 
 ## Recently Completed ✅
 
@@ -193,6 +204,15 @@
 - ✅ Tesseract OCR 5.4.0 integration on Windows
 - ✅ Permission-based recipe edit/delete (owner or group permission)
 - ✅ Recipe form field order: Title → Authors → Genres → Ingredients → Instructions → URL → Image
+- ✅ URL scraping: import recipes from web pages (JSON-LD, BS4, regex fallback)
+- ✅ OCR URL detection with automatic repair of OCR artifacts
+- ✅ Merge confirmation UI for conflicting data (side-by-side keep/replace)
+- ✅ Auto-fill empty recipe fields from scraped data
+- ✅ Combined OCR + URL data merging with URL data preferred
+- ✅ beautifulsoup4 dependency added for HTML parsing
+- ✅ OCRUploadForm: supports URL-only, image-only, or both
+- ✅ recipe_merge_confirm view with session-based conflict storage
+- ✅ 235 comprehensive tests (up from 115)
 
 ## Notes
 
@@ -204,4 +224,4 @@
 
 ---
 
-Last Updated: February 18, 2026
+Last Updated: February 19, 2026

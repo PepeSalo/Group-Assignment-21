@@ -1,10 +1,16 @@
 import os
 import logging
+import re
 import shutil
 import subprocess
 import threading
 import time
 import gc
+import json
+import urllib.request
+import urllib.parse
+import urllib.error
+from html.parser import HTMLParser
 from pathlib import Path
 
 from django.shortcuts import render, redirect, get_object_or_404
@@ -23,6 +29,12 @@ from django.core.paginator import Paginator
 
 import pytesseract
 from PIL import Image
+
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
 
 from .models import (
     Recipe, Author, Genre, Ingredient, RecipeIngredient,
@@ -73,6 +85,675 @@ def _background_delete_file(file_path):
 # Configure Tesseract
 if hasattr(settings, 'TESSERACT_CMD'):
     pytesseract.pytesseract.tesseract_cmd = settings.TESSERACT_CMD
+
+# Constants for web scraping
+SCRAPE_TIMEOUT = 15  # seconds
+SCRAPE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RecipeDB/1.0'
+URL_REGEX = re.compile(
+    r'https?://[^\s<>"\')\]},;]+',
+    re.IGNORECASE
+)
+
+# Pattern for OCR-garbled URLs (missing ://, extra spaces, etc.)
+OCR_URL_REGEX = re.compile(
+    r'https?\s*[:/\\]+\s*[/\\]?\s*[A-Za-z]?(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}[^\s<>"\']*',
+    re.IGNORECASE
+)
+
+
+def _extract_urls_from_text(text):
+    """
+    Extract URLs from OCR text using regex.
+    Handles both clean URLs and OCR-garbled URLs with common artifacts.
+
+    Args:
+        text: Raw text (from OCR or any source)
+
+    Returns:
+        list of URL strings found in the text
+    """
+    if not text:
+        return []
+
+    urls = set()
+
+    # Strategy 1: Clean URL regex
+    for url in URL_REGEX.findall(text):
+        url = url.rstrip('.,;:!?)')
+        if len(url) > 10:
+            urls.add(url)
+
+    # Strategy 2: OCR-garbled URL repair
+    for match in OCR_URL_REGEX.finditer(text):
+        raw = match.group(0)
+        repaired = _repair_ocr_url(raw)
+        if repaired:
+            repaired = repaired.rstrip('.,;:!?)')
+            if len(repaired) > 10:
+                urls.add(repaired)
+
+    # Strategy 3: Look for domain-like patterns without scheme
+    domain_pattern = re.compile(
+        r'(?:www\.)[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z]{2,}[^\s<>"\']*',
+        re.IGNORECASE
+    )
+    for match in domain_pattern.finditer(text):
+        raw = match.group(0).rstrip('.,;:!?)')
+        if len(raw) > 10:
+            urls.add('https://' + raw)
+
+    return list(urls)
+
+
+def _repair_ocr_url(raw_url):
+    """
+    Attempt to repair a URL that was garbled by OCR.
+    Common OCR errors:
+    - 'https /Awww.' instead of 'https://www.'
+    - Missing '://'
+    - Extra spaces
+    - 'l' vs '1', 'O' vs '0', etc.
+
+    Args:
+        raw_url: Raw string that might be a garbled URL
+
+    Returns:
+        Repaired URL string or None if unrepairable
+    """
+    if not raw_url:
+        return None
+
+    url = raw_url.strip()
+
+    # Remove leading non-URL characters
+    url = re.sub(r'^[^hH]*(?=https?)', '', url)
+
+    # Fix scheme: 'https //' → 'https://', 'https /' → 'https://'
+    url = re.sub(r'^(https?)\s*[:/\\]+\s*[/\\]?\s*', r'\1://', url, flags=re.IGNORECASE)
+
+    # Remove accidental uppercase after scheme (OCR artifact: 'https://Awww' → 'https://www')
+    url = re.sub(r'^(https?://)([A-Z])(?=www\.)', r'\1', url, flags=re.IGNORECASE)
+
+    # Remove spaces within URL
+    parts = url.split('://', 1)
+    if len(parts) == 2:
+        url = parts[0] + '://' + parts[1].replace(' ', '')
+
+    # Validate basic URL structure
+    if re.match(r'^https?://[a-zA-Z0-9]', url):
+        return url
+
+    return None
+
+
+def scrape_recipe_from_url(url):
+    """
+    Scrape recipe data from a URL.
+
+    Tries multiple strategies:
+    1. JSON-LD structured data (schema.org Recipe)
+    2. Open Graph / meta tags
+    3. BeautifulSoup HTML parsing (headings, lists)
+    4. Fallback plain text extraction
+
+    Args:
+        url: URL string to scrape
+
+    Returns:
+        dict with keys: title, instructions, ingredients (list of dicts),
+        authors (list of strings), genres (list of strings),
+        image_url, source_url, description, success, error
+    """
+    result = {
+        'title': '',
+        'instructions': '',
+        'ingredients': [],
+        'authors': [],
+        'genres': [],
+        'image_url': '',
+        'source_url': url,
+        'description': '',
+        'success': False,
+        'error': '',
+    }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                'User-Agent': SCRAPE_USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9,fi;q=0.8',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=SCRAPE_TIMEOUT) as response:
+            content_type = response.headers.get('Content-Type', '')
+            encoding = 'utf-8'
+            if 'charset=' in content_type:
+                encoding = content_type.split('charset=')[-1].split(';')[0].strip()
+            html_bytes = response.read()
+            html = html_bytes.decode(encoding, errors='replace')
+
+        if not html.strip():
+            result['error'] = 'Empty response from URL'
+            return result
+
+        # Strategy 1: JSON-LD structured data
+        jsonld_data = _extract_jsonld_recipe(html)
+        if jsonld_data:
+            result.update(jsonld_data)
+            result['success'] = True
+            result['source_url'] = url
+            logger.info(f"Scraped recipe via JSON-LD from {url}")
+            return result
+
+        # Strategy 2: Parse with BeautifulSoup (or fallback)
+        if HAS_BS4:
+            parsed = _extract_recipe_bs4(html, url)
+        else:
+            parsed = _extract_recipe_fallback(html, url)
+
+        if parsed.get('title'):
+            result.update(parsed)
+            result['success'] = True
+            result['source_url'] = url
+            logger.info(f"Scraped recipe via HTML parsing from {url}")
+        else:
+            result['error'] = 'Could not extract recipe data from URL'
+
+    except urllib.error.HTTPError as e:
+        result['error'] = f'HTTP error {e.code}: {e.reason}'
+        logger.warning(f"HTTP error scraping {url}: {e}")
+    except urllib.error.URLError as e:
+        result['error'] = f'URL error: {e.reason}'
+        logger.warning(f"URL error scraping {url}: {e}")
+    except Exception as e:
+        result['error'] = f'Scraping error: {str(e)}'
+        logger.error(f"Error scraping {url}: {e}")
+
+    return result
+
+
+def _extract_jsonld_recipe(html):
+    """
+    Extract recipe data from JSON-LD script tags.
+
+    Args:
+        html: Raw HTML string
+
+    Returns:
+        dict with recipe data or None if no recipe JSON-LD found
+    """
+    try:
+        # Find all JSON-LD script blocks
+        pattern = re.compile(
+            r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            re.DOTALL | re.IGNORECASE
+        )
+        matches = pattern.findall(html)
+
+        for match in matches:
+            try:
+                data = json.loads(match.strip())
+            except json.JSONDecodeError:
+                continue
+
+            # Handle both single object and @graph array
+            recipes = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        if item.get('@type') == 'Recipe' or (
+                            isinstance(item.get('@type'), list) and 'Recipe' in item['@type']
+                        ):
+                            recipes.append(item)
+                        if '@graph' in item:
+                            for g in item['@graph']:
+                                if isinstance(g, dict) and (
+                                    g.get('@type') == 'Recipe' or
+                                    (isinstance(g.get('@type'), list) and 'Recipe' in g['@type'])
+                                ):
+                                    recipes.append(g)
+            elif isinstance(data, dict):
+                if data.get('@type') == 'Recipe' or (
+                    isinstance(data.get('@type'), list) and 'Recipe' in data['@type']
+                ):
+                    recipes.append(data)
+                if '@graph' in data:
+                    for g in data['@graph']:
+                        if isinstance(g, dict) and (
+                            g.get('@type') == 'Recipe' or
+                            (isinstance(g.get('@type'), list) and 'Recipe' in g['@type'])
+                        ):
+                            recipes.append(g)
+
+            for recipe in recipes:
+                return _parse_jsonld_recipe(recipe)
+
+    except Exception as e:
+        logger.debug(f"JSON-LD extraction failed: {e}")
+
+    return None
+
+
+def _parse_jsonld_recipe(data):
+    """
+    Parse a JSON-LD Recipe object into our standard dict format.
+
+    Args:
+        data: dict from parsed JSON-LD
+
+    Returns:
+        dict with recipe data
+    """
+    result = {
+        'title': '',
+        'instructions': '',
+        'ingredients': [],
+        'authors': [],
+        'genres': [],
+        'image_url': '',
+        'description': '',
+    }
+
+    # Title
+    result['title'] = _clean_html_text(str(data.get('name', '')))
+
+    # Description
+    result['description'] = _clean_html_text(str(data.get('description', '')))
+
+    # Instructions
+    instructions = data.get('recipeInstructions', '')
+    if isinstance(instructions, list):
+        steps = []
+        for item in instructions:
+            if isinstance(item, str):
+                steps.append(_clean_html_text(item))
+            elif isinstance(item, dict):
+                text = item.get('text', item.get('name', ''))
+                if text:
+                    steps.append(_clean_html_text(str(text)))
+        result['instructions'] = '\n'.join(steps)
+    elif isinstance(instructions, str):
+        result['instructions'] = _clean_html_text(instructions)
+
+    # Ingredients
+    ingredients = data.get('recipeIngredient', [])
+    if isinstance(ingredients, list):
+        for i, ing in enumerate(ingredients):
+            ing_text = _clean_html_text(str(ing))
+            # Try to parse "quantity name" format
+            parts = ing_text.split(None, 1)
+            if len(parts) == 2 and any(c.isdigit() for c in parts[0]):
+                result['ingredients'].append({
+                    'name': parts[1],
+                    'quantity': parts[0],
+                    'order': i,
+                })
+            else:
+                result['ingredients'].append({
+                    'name': ing_text,
+                    'quantity': '',
+                    'order': i,
+                })
+
+    # Authors
+    author = data.get('author', [])
+    if isinstance(author, dict):
+        author = [author]
+    elif isinstance(author, str):
+        author = [{'name': author}]
+    if isinstance(author, list):
+        for a in author:
+            if isinstance(a, dict):
+                name = a.get('name', '')
+                if name:
+                    result['authors'].append(_clean_html_text(str(name)))
+            elif isinstance(a, str):
+                result['authors'].append(_clean_html_text(a))
+
+    # Genres / categories
+    category = data.get('recipeCategory', [])
+    cuisine = data.get('recipeCuisine', [])
+    if isinstance(category, str):
+        category = [category]
+    if isinstance(cuisine, str):
+        cuisine = [cuisine]
+    for cat in (category or []):
+        result['genres'].append(_clean_html_text(str(cat)))
+    for cuis in (cuisine or []):
+        result['genres'].append(_clean_html_text(str(cuis)))
+
+    # Image
+    image = data.get('image', '')
+    if isinstance(image, list) and image:
+        image = image[0]
+    if isinstance(image, dict):
+        image = image.get('url', '')
+    result['image_url'] = str(image) if image else ''
+
+    return result
+
+
+def _extract_recipe_bs4(html, url):
+    """
+    Extract recipe data using BeautifulSoup HTML parsing.
+
+    Args:
+        html: Raw HTML string
+        url: Source URL (for context)
+
+    Returns:
+        dict with recipe data
+    """
+    result = {
+        'title': '',
+        'instructions': '',
+        'ingredients': [],
+        'authors': [],
+        'genres': [],
+        'image_url': '',
+        'description': '',
+    }
+
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Title: try meta og:title, then <title>, then <h1>
+        og_title = soup.find('meta', property='og:title')
+        if og_title and og_title.get('content'):
+            result['title'] = og_title['content'].strip()
+        elif soup.title and soup.title.string:
+            result['title'] = soup.title.string.strip()
+        elif soup.h1:
+            result['title'] = soup.h1.get_text(strip=True)
+
+        # Description: try meta description
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc and meta_desc.get('content'):
+            result['description'] = meta_desc['content'].strip()
+        og_desc = soup.find('meta', property='og:description')
+        if og_desc and og_desc.get('content') and not result['description']:
+            result['description'] = og_desc['content'].strip()
+
+        # Image: try meta og:image
+        og_img = soup.find('meta', property='og:image')
+        if og_img and og_img.get('content'):
+            result['image_url'] = og_img['content'].strip()
+
+        # Author
+        meta_author = soup.find('meta', attrs={'name': 'author'})
+        if meta_author and meta_author.get('content'):
+            result['authors'].append(meta_author['content'].strip())
+
+        # Try to find ingredient lists (common CSS classes)
+        ingredient_selectors = [
+            'recipe-ingredient', 'ingredient', 'ingredients',
+            'wprm-recipe-ingredient', 'tasty-recipes-ingredients',
+        ]
+        for sel in ingredient_selectors:
+            items = soup.find_all(class_=re.compile(sel, re.IGNORECASE))
+            if items:
+                for i, item in enumerate(items):
+                    text = item.get_text(strip=True)
+                    if text and len(text) > 1:
+                        result['ingredients'].append({
+                            'name': text,
+                            'quantity': '',
+                            'order': i,
+                        })
+                if result['ingredients']:
+                    break
+
+        # Try to find instructions
+        instruction_selectors = [
+            'recipe-instruction', 'instruction', 'instructions',
+            'wprm-recipe-instruction', 'tasty-recipes-instructions',
+            'recipe-directions', 'directions', 'method', 'steps',
+        ]
+        for sel in instruction_selectors:
+            items = soup.find_all(class_=re.compile(sel, re.IGNORECASE))
+            if items:
+                steps = []
+                for item in items:
+                    text = item.get_text(strip=True)
+                    if text and len(text) > 5:
+                        steps.append(text)
+                if steps:
+                    result['instructions'] = '\n'.join(steps)
+                    break
+
+        # Fallback: use main content paragraphs as instructions
+        if not result['instructions']:
+            article = soup.find('article') or soup.find('main') or soup.find('div', class_=re.compile('content|post|entry', re.IGNORECASE))
+            if article:
+                paragraphs = article.find_all('p')
+                text_parts = []
+                for p in paragraphs:
+                    t = p.get_text(strip=True)
+                    if t and len(t) > 20:
+                        text_parts.append(t)
+                if text_parts:
+                    result['instructions'] = '\n\n'.join(text_parts[:20])
+
+        # Clean title - remove site name suffix
+        if result['title'] and ' | ' in result['title']:
+            result['title'] = result['title'].split(' | ')[0].strip()
+        if result['title'] and ' - ' in result['title']:
+            parts = result['title'].split(' - ')
+            if len(parts) == 2 and len(parts[0]) > len(parts[1]):
+                result['title'] = parts[0].strip()
+
+    except Exception as e:
+        logger.error(f"BeautifulSoup parsing error: {e}")
+
+    return result
+
+
+def _extract_recipe_fallback(html, url):
+    """
+    Fallback recipe extraction without BeautifulSoup using regex.
+
+    Args:
+        html: Raw HTML string
+        url: Source URL
+
+    Returns:
+        dict with recipe data
+    """
+    result = {
+        'title': '',
+        'instructions': '',
+        'ingredients': [],
+        'authors': [],
+        'genres': [],
+        'image_url': '',
+        'description': '',
+    }
+
+    try:
+        # Extract title from <title> tag
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            result['title'] = _clean_html_text(title_match.group(1))
+
+        # Extract og:title
+        og_match = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\'](.*?)["\']', html, re.IGNORECASE)
+        if og_match:
+            result['title'] = _clean_html_text(og_match.group(1))
+
+        # Extract description
+        desc_match = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content=["\'](.*?)["\']', html, re.IGNORECASE)
+        if desc_match:
+            result['description'] = _clean_html_text(desc_match.group(1))
+
+        # Extract og:image
+        img_match = re.search(r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\'](.*?)["\']', html, re.IGNORECASE)
+        if img_match:
+            result['image_url'] = img_match.group(1)
+
+        # Clean title
+        if result['title'] and ' | ' in result['title']:
+            result['title'] = result['title'].split(' | ')[0].strip()
+
+    except Exception as e:
+        logger.error(f"Fallback HTML parsing error: {e}")
+
+    return result
+
+
+def _clean_html_text(text):
+    """Remove HTML tags and decode entities from text."""
+    if not text:
+        return ''
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Decode common HTML entities
+    text = text.replace('&amp;', '&')
+    text = text.replace('&lt;', '<')
+    text = text.replace('&gt;', '>')
+    text = text.replace('&quot;', '"')
+    text = text.replace('&#39;', "'")
+    text = text.replace('&nbsp;', ' ')
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _merge_recipe_data(existing_data, new_data):
+    """
+    Compare existing recipe data with new scraped data.
+    Identifies fields that can be auto-filled (empty in existing)
+    and fields that conflict (both have different values).
+
+    Args:
+        existing_data: dict with current recipe field values
+        new_data: dict with scraped data
+
+    Returns:
+        tuple of (auto_updates: dict, conflicts: dict)
+        auto_updates: fields that will be auto-filled (were empty)
+        conflicts: fields where existing vs new data differs
+    """
+    auto_updates = {}
+    conflicts = {}
+
+    text_fields = ['title', 'instructions', 'description']
+    for field in text_fields:
+        existing_val = existing_data.get(field, '').strip()
+        new_val = new_data.get(field, '').strip()
+        if new_val:
+            if not existing_val:
+                auto_updates[field] = new_val
+            elif existing_val != new_val:
+                conflicts[field] = {
+                    'existing': existing_val,
+                    'new': new_val,
+                }
+
+    # List fields
+    list_fields = ['ingredients', 'authors', 'genres']
+    for field in list_fields:
+        existing_list = existing_data.get(field, [])
+        new_list = new_data.get(field, [])
+        if new_list:
+            if not existing_list:
+                auto_updates[field] = new_list
+            elif existing_list != new_list:
+                conflicts[field] = {
+                    'existing': existing_list,
+                    'new': new_list,
+                }
+
+    # Image / source_url
+    for field in ['image_url', 'source_url']:
+        existing_val = existing_data.get(field, '').strip()
+        new_val = new_data.get(field, '').strip()
+        if new_val:
+            if not existing_val:
+                auto_updates[field] = new_val
+            elif existing_val != new_val:
+                conflicts[field] = {
+                    'existing': existing_val,
+                    'new': new_val,
+                }
+
+    return auto_updates, conflicts
+
+
+def _get_existing_recipe_data(recipe):
+    """
+    Extract current data from a Recipe instance into a comparable dict.
+
+    Args:
+        recipe: Recipe model instance
+
+    Returns:
+        dict with recipe data
+    """
+    # Get ingredients as text list
+    ingredients_list = []
+    ris = RecipeIngredient.objects.filter(recipe=recipe).select_related('ingredient').order_by('order')
+    for ri in ris:
+        if ri.quantity:
+            ingredients_list.append(f"{ri.quantity} - {ri.ingredient.name}")
+        else:
+            ingredients_list.append(ri.ingredient.name)
+
+    # Get authors
+    authors_list = [str(a) for a in recipe.authors.all()]
+
+    # Get genres
+    genres_list = [g.name for g in recipe.genres.all()]
+
+    # Get primary URL
+    primary_url = RecipeURL.objects.filter(recipe=recipe, is_primary=True).first()
+    source_url = primary_url.url if primary_url else ''
+
+    # Get image URL
+    image_url = recipe.image.url if recipe.image else ''
+
+    return {
+        'title': recipe.title,
+        'instructions': recipe.instructions,
+        'description': '',  # Recipe model doesn't have description yet
+        'ingredients': ingredients_list,
+        'authors': authors_list,
+        'genres': genres_list,
+        'source_url': source_url,
+        'image_url': image_url,
+    }
+
+
+def _find_existing_recipe_by_url(url):
+    """
+    Find an existing recipe that has the given URL.
+
+    Args:
+        url: URL string to search for
+
+    Returns:
+        Recipe instance or None
+    """
+    recipe_url = RecipeURL.objects.filter(url=url).first()
+    if recipe_url:
+        return recipe_url.recipe
+    return None
+
+
+def _find_existing_recipe_by_title(title):
+    """
+    Find an existing recipe by title (case-insensitive).
+
+    Args:
+        title: Recipe title to search for
+
+    Returns:
+        Recipe instance or None
+    """
+    if not title:
+        return None
+    return Recipe.objects.filter(title__iexact=title.strip()).first()
 
 
 # ============= Home and Basic Views =============
@@ -529,126 +1210,528 @@ def rate_recipe(request, pk):
 
 @login_required
 def ocr_upload(request):
-    """Upload images for OCR processing."""
+    """Upload images for OCR processing and/or scrape recipes from URLs."""
     if request.method == 'POST':
         form = OCRUploadForm(request.POST, request.FILES)
         if form.is_valid():
             try:
-                image_file = form.cleaned_data['image_file']
+                image_file = form.cleaned_data.get('image_file')
+                recipe_url = form.cleaned_data.get('recipe_url', '').strip()
                 auto_search_web = form.cleaned_data.get('auto_search_web', False)
-                original_filename = image_file.name
-                logger.debug(f"OCR upload: original_filename={original_filename!r}")
-                
-                # Process the image
-                result = process_ocr_image(image_file, request.user, auto_search_web)
-                logger.debug(f"OCR result: success={result.get('success')}, error={result.get('error', 'none')}")
-                
-                # Close the uploaded file to release handles before file ops
-                image_file.close()
-                gc.collect()
-                
-                # Handle the source file in IMAGES folder
-                images_folder = Path(getattr(settings, 'OCR_IMAGES_FOLDER', ''))
-                logger.debug(f"IMAGES folder: {images_folder}, exists={images_folder.exists()}")
-                if images_folder.exists():
-                    source_path = images_folder / original_filename
-                    logger.debug(f"Trying exact match: {source_path}, exists={source_path.exists()}")
-                    
-                    # Django sanitizes filenames (spaces → underscores), so also try
-                    # the original name with underscores replaced back to spaces
-                    if not source_path.exists():
-                        alt_name = original_filename.replace('_', ' ')
-                        alt_path = images_folder / alt_name
-                        logger.debug(f"Trying spaces restored: {alt_path}, exists={alt_path.exists()}")
-                        if alt_path.exists():
-                            source_path = alt_path
-                            logger.info(f"Matched with spaces restored: {source_path}")
-                    
-                    # If still not found, search the folder for a matching file
-                    if not source_path.exists():
-                        logger.info(f"No match for '{original_filename}' in {images_folder}, searching...")
-                        orig_stem = Path(original_filename).stem.lower().replace('_', ' ')
-                        orig_suffix = Path(original_filename).suffix.lower()
-                        for f in images_folder.iterdir():
-                            if f.is_file() and not f.name.startswith('ERR_'):
-                                if (f.suffix.lower() == orig_suffix and 
-                                    f.stem.lower().replace('_', ' ') == orig_stem):
-                                    source_path = f
-                                    logger.info(f"Fuzzy matched to: {source_path}")
-                                    break
-                    
-                    if source_path.exists():
-                        if result['success']:
-                            # Delete from IMAGES folder (already saved to media/recipes)
-                            # Schedule in background so user doesn't wait
-                            _background_delete_file(source_path)
-                            messages.info(request, "Source image will be deleted from IMAGES folder.")
-                        else:
-                            # Rename with ERR prefix: copy immediately, delete original in background
-                            err_name = f"ERR_{source_path.name}"
-                            err_path = images_folder / err_name
-                            # Avoid overwriting existing ERR files
-                            counter = 1
-                            while err_path.exists():
-                                stem = source_path.stem
-                                suffix = source_path.suffix
-                                err_name = f"ERR_{stem}_{counter}{suffix}"
-                                err_path = images_folder / err_name
-                                counter += 1
-                            try:
-                                shutil.copy2(str(source_path), str(err_path))
-                                logger.info(f"Copied failed OCR image to: {err_path}")
-                                messages.info(request, f"Source image renamed to {err_name}")
-                                # Delete original in background
-                                _background_delete_file(source_path)
-                            except Exception as e:
-                                logger.warning(f"Could not copy source image: {e}")
-                                messages.warning(request, f"Could not rename source image: {e}")
+                original_filename = image_file.name if image_file else None
+                logger.debug(f"OCR upload: image={original_filename!r}, url={recipe_url!r}")
+
+                ocr_data = None
+                url_data = None
+                detected_urls = []
+
+                # ---------- Step 1: OCR processing ----------
+                if image_file:
+                    ocr_result = process_ocr_image(image_file, request.user, auto_search_web=False)
+                    logger.debug(f"OCR result: success={ocr_result.get('success')}")
+
+                    if ocr_result['success']:
+                        ocr_data = ocr_result.get('recipe_data', {})
+
+                    # Extract URLs from OCR text even if OCR confidence is low
+                    ocr_text = ocr_result.get('raw_text', '')
+                    detected_urls = _extract_urls_from_text(ocr_text)
+                    if detected_urls:
+                        logger.info(f"URLs found in OCR text: {detected_urls}")
+
+                    # Close the uploaded file to release handles
+                    image_file.close()
+                    gc.collect()
+
+                    # Handle IMAGES folder file management
+                    _handle_images_folder_file(original_filename, ocr_result['success'], request)
+
+                # ---------- Step 2: URL scraping ----------
+                # Scrape from explicit URL
+                if recipe_url:
+                    url_data = scrape_recipe_from_url(recipe_url)
+                    if url_data['success']:
+                        messages.info(request, f"Successfully scraped recipe from URL.")
                     else:
-                        logger.warning(f"Source image not found in IMAGES folder: {original_filename}")
-                        messages.warning(request, f"Source image '{original_filename}' not found in IMAGES folder.")
-                
-                if result['success']:
-                    messages.success(request, f"Recipe processed successfully! Confidence: {result['confidence']:.1%}")
-                    return redirect('recipe_detail', pk=result['recipe_id'])
+                        messages.warning(request, f"URL scraping: {url_data['error']}")
+
+                # If no explicit URL but OCR detected URLs, try scraping them
+                if not url_data and detected_urls:
+                    for detected_url in detected_urls[:3]:  # Try up to 3 detected URLs
+                        url_data = scrape_recipe_from_url(detected_url)
+                        if url_data['success']:
+                            messages.info(request, f"Scraped recipe from URL found in image: {detected_url}")
+                            break
+                        else:
+                            logger.debug(f"Failed to scrape detected URL: {detected_url}")
+
+                # If auto_search_web and we have a title but no URL data, search the web
+                if auto_search_web and not url_data:
+                    title = None
+                    if ocr_data and ocr_data.get('title'):
+                        title = ocr_data['title']
+                    if title:
+                        found_url = _search_web_for_recipe(title)
+                        if found_url:
+                            url_data = scrape_recipe_from_url(found_url)
+                            if url_data and url_data['success']:
+                                messages.info(request, f"Found and scraped recipe from web search.")
+
+                # ---------- Step 3: Combine data and decide action ----------
+                combined_data = _combine_ocr_and_url_data(ocr_data, url_data)
+
+                if not combined_data or not combined_data.get('title'):
+                    if image_file and not (ocr_data or url_data):
+                        if ocr_result.get('error'):
+                            messages.error(request, f"OCR failed: {ocr_result['error']}")
+                        else:
+                            messages.error(request, "Could not extract recipe data.")
+                    elif not url_data:
+                        messages.error(request, "No recipe data could be extracted.")
+                    return render(request, 'RecipeDB/ocr_upload.html', {'form': form})
+
+                # Check for existing recipe (by URL first, then by title)
+                existing_recipe = None
+                if recipe_url:
+                    existing_recipe = _find_existing_recipe_by_url(recipe_url)
+                if not existing_recipe and combined_data.get('title'):
+                    existing_recipe = _find_existing_recipe_by_title(combined_data['title'])
+
+                if existing_recipe:
+                    # Recipe exists - check for conflicts
+                    existing_data = _get_existing_recipe_data(existing_recipe)
+                    auto_updates, conflicts = _merge_recipe_data(existing_data, combined_data)
+
+                    # Auto-apply non-conflicting updates
+                    if auto_updates:
+                        _apply_auto_updates(existing_recipe, auto_updates, request.user)
+                        messages.success(
+                            request,
+                            f"Auto-filled {len(auto_updates)} empty field(s) in '{existing_recipe.title}'."
+                        )
+
+                    if conflicts:
+                        # Store combined data and conflicts in session for merge confirmation
+                        request.session['merge_recipe_id'] = existing_recipe.pk
+                        request.session['merge_conflicts'] = _serialize_conflicts(conflicts)
+                        request.session['merge_new_data'] = _serialize_new_data(combined_data)
+                        return redirect('recipe_merge_confirm')
+                    else:
+                        return redirect('recipe_detail', pk=existing_recipe.pk)
                 else:
-                    messages.error(request, f"OCR processing failed: {result['error']}")
+                    # No existing recipe - create new one
+                    recipe = _create_recipe_from_data(combined_data, request.user, image_file)
+                    messages.success(request, f"Recipe '{recipe.title}' created successfully!")
+                    return redirect('recipe_detail', pk=recipe.pk)
+
             except Exception as e:
-                logger.error(f"Error during OCR upload: {e}")
-                messages.error(request, 'Error processing image.')
+                logger.error(f"Error during OCR upload: {e}", exc_info=True)
+                messages.error(request, f'Error processing: {e}')
     else:
         form = OCRUploadForm()
-    
+
     return render(request, 'RecipeDB/ocr_upload.html', {'form': form})
+
+
+def _handle_images_folder_file(original_filename, success, request):
+    """Handle file management in the IMAGES folder after OCR processing."""
+    if not original_filename:
+        return
+
+    images_folder = Path(getattr(settings, 'OCR_IMAGES_FOLDER', ''))
+    logger.debug(f"IMAGES folder: {images_folder}, exists={images_folder.exists()}")
+    if not images_folder.exists():
+        return
+
+    source_path = images_folder / original_filename
+    logger.debug(f"Trying exact match: {source_path}, exists={source_path.exists()}")
+
+    # Django sanitizes filenames (spaces → underscores), try original name
+    if not source_path.exists():
+        alt_name = original_filename.replace('_', ' ')
+        alt_path = images_folder / alt_name
+        if alt_path.exists():
+            source_path = alt_path
+            logger.info(f"Matched with spaces restored: {source_path}")
+
+    # Fuzzy stem match
+    if not source_path.exists():
+        orig_stem = Path(original_filename).stem.lower().replace('_', ' ')
+        orig_suffix = Path(original_filename).suffix.lower()
+        for f in images_folder.iterdir():
+            if f.is_file() and not f.name.startswith('ERR_'):
+                if (f.suffix.lower() == orig_suffix and
+                    f.stem.lower().replace('_', ' ') == orig_stem):
+                    source_path = f
+                    logger.info(f"Fuzzy matched to: {source_path}")
+                    break
+
+    if source_path.exists():
+        if success:
+            _background_delete_file(source_path)
+            messages.info(request, "Source image will be deleted from IMAGES folder.")
+        else:
+            err_name = f"ERR_{source_path.name}"
+            err_path = images_folder / err_name
+            counter = 1
+            while err_path.exists():
+                stem = source_path.stem
+                suffix = source_path.suffix
+                err_name = f"ERR_{stem}_{counter}{suffix}"
+                err_path = images_folder / err_name
+                counter += 1
+            try:
+                shutil.copy2(str(source_path), str(err_path))
+                logger.info(f"Copied failed OCR image to: {err_path}")
+                messages.info(request, f"Source image renamed to {err_name}")
+                _background_delete_file(source_path)
+            except Exception as e:
+                logger.warning(f"Could not copy source image: {e}")
+                messages.warning(request, f"Could not rename source image: {e}")
+    else:
+        logger.warning(f"Source image not found in IMAGES folder: {original_filename}")
+
+
+def _combine_ocr_and_url_data(ocr_data, url_data):
+    """
+    Combine OCR data and URL-scraped data, preferring URL data for structured fields.
+
+    Args:
+        ocr_data: dict from OCR processing (or None)
+        url_data: dict from URL scraping (or None)
+
+    Returns:
+        dict with combined recipe data
+    """
+    if not ocr_data and not url_data:
+        return None
+    if not ocr_data:
+        return url_data
+    if not url_data or not url_data.get('success'):
+        return ocr_data
+
+    # URL data is generally more structured, prefer it for most fields
+    combined = {}
+    combined['title'] = url_data.get('title') or ocr_data.get('title', '')
+    combined['instructions'] = url_data.get('instructions') or ocr_data.get('instructions', '')
+    combined['ingredients'] = url_data.get('ingredients') or ocr_data.get('ingredients', [])
+    combined['authors'] = url_data.get('authors') or ocr_data.get('authors', [])
+    combined['genres'] = url_data.get('genres') or ocr_data.get('genres', [])
+    combined['image_url'] = url_data.get('image_url') or ocr_data.get('image_url', '')
+    combined['source_url'] = url_data.get('source_url') or ocr_data.get('source_url', '')
+    combined['description'] = url_data.get('description') or ocr_data.get('description', '')
+    combined['confidence'] = ocr_data.get('confidence', 0.0)
+
+    return combined
+
+
+def _apply_auto_updates(recipe, auto_updates, user):
+    """
+    Apply non-conflicting updates to an existing recipe.
+    Only fills in fields that were previously empty.
+
+    Args:
+        recipe: Recipe instance
+        auto_updates: dict of field_name -> new_value
+        user: User performing the update
+    """
+    from .models import MAX_TITLE_LENGTH, MAX_NAME_LENGTH
+
+    save_needed = False
+
+    if 'title' in auto_updates and not recipe.title.strip():
+        recipe.title = auto_updates['title'][:MAX_TITLE_LENGTH]
+        save_needed = True
+
+    if 'instructions' in auto_updates and not recipe.instructions.strip():
+        recipe.instructions = auto_updates['instructions']
+        save_needed = True
+
+    if save_needed:
+        recipe.save()
+
+    if 'ingredients' in auto_updates:
+        _save_ingredients_list(recipe, auto_updates['ingredients'])
+
+    if 'authors' in auto_updates:
+        for author_name in auto_updates['authors']:
+            _add_author_by_name(recipe, author_name)
+
+    if 'genres' in auto_updates:
+        for genre_name in auto_updates['genres']:
+            genre, _ = Genre.objects.get_or_create(
+                name__iexact=genre_name, defaults={'name': genre_name}
+            )
+            recipe.genres.add(genre)
+
+    if 'source_url' in auto_updates:
+        _save_source_url(recipe, auto_updates['source_url'])
+
+
+def _save_ingredients_list(recipe, ingredients):
+    """
+    Save a list of ingredient dicts to a recipe.
+
+    Args:
+        recipe: Recipe instance
+        ingredients: list of dicts with name, quantity, order keys
+            OR list of strings like "quantity - name"
+    """
+    from .models import MAX_NAME_LENGTH
+
+    if isinstance(ingredients, list) and ingredients:
+        if isinstance(ingredients[0], dict):
+            for ing_data in ingredients:
+                name = ing_data.get('name', '').strip().lower()[:MAX_NAME_LENGTH]
+                if not name:
+                    continue
+                ingredient, _ = Ingredient.objects.get_or_create(name=name)
+                RecipeIngredient.objects.get_or_create(
+                    recipe=recipe,
+                    ingredient=ingredient,
+                    defaults={
+                        'quantity': ing_data.get('quantity', '')[:100],
+                        'order': ing_data.get('order', 0),
+                    }
+                )
+        elif isinstance(ingredients[0], str):
+            # Parse text format
+            text = '\n'.join(ingredients)
+            _save_ingredients_from_text(recipe, text)
+
+
+def _add_author_by_name(recipe, name):
+    """Add an author to a recipe by name string."""
+    from .models import MAX_NAME_LENGTH
+
+    name = name.strip()[:MAX_NAME_LENGTH]
+    if not name:
+        return
+
+    author = Author.objects.filter(
+        Q(publisher_name__iexact=name) |
+        Q(first_name__iexact=name) |
+        Q(last_name__iexact=name)
+    ).first()
+
+    if not author:
+        parts = name.split(None, 1)
+        if len(parts) == 2:
+            author, _ = Author.objects.get_or_create(
+                first_name=parts[0][:MAX_NAME_LENGTH],
+                last_name=parts[1][:MAX_NAME_LENGTH],
+                defaults={'publisher_name': ''}
+            )
+        else:
+            author, _ = Author.objects.get_or_create(publisher_name=name)
+
+    recipe.authors.add(author)
+
+
+def _create_recipe_from_data(data, user, image_file=None):
+    """
+    Create a new Recipe from combined data dict.
+
+    Args:
+        data: dict with recipe data
+        user: User creating the recipe
+        image_file: Optional uploaded image file
+
+    Returns:
+        Recipe instance
+    """
+    from .models import MAX_TITLE_LENGTH, MAX_NAME_LENGTH
+
+    title = data.get('title', 'Untitled Recipe')[:MAX_TITLE_LENGTH]
+    instructions = data.get('instructions', '')
+    if not instructions and data.get('description'):
+        instructions = data['description']
+
+    recipe = Recipe.objects.create(
+        title=title,
+        instructions=instructions or 'No instructions available.',
+        created_by=user,
+        ocr_confidence=data.get('confidence'),
+        source_file=data.get('source_file', ''),
+    )
+
+    # Save image from upload
+    if image_file:
+        try:
+            image_file.seek(0)
+            recipe.image.save(image_file.name, image_file, save=True)
+        except Exception as e:
+            logger.warning(f"Could not save uploaded image: {e}")
+
+    # Add ingredients
+    if data.get('ingredients'):
+        _save_ingredients_list(recipe, data['ingredients'])
+
+    # Add authors
+    for author_name in data.get('authors', []):
+        _add_author_by_name(recipe, author_name)
+
+    # Add genres
+    for genre_name in data.get('genres', []):
+        genre_name = genre_name.strip()[:MAX_NAME_LENGTH]
+        if genre_name:
+            genre, _ = Genre.objects.get_or_create(
+                name__iexact=genre_name, defaults={'name': genre_name}
+            )
+            recipe.genres.add(genre)
+
+    # Add source URL
+    source_url = data.get('source_url', '')
+    if source_url:
+        RecipeURL.objects.create(
+            recipe=recipe,
+            url=source_url,
+            description='Source',
+            is_primary=True,
+        )
+
+    return recipe
+
+
+def _serialize_conflicts(conflicts):
+    """Serialize conflicts dict for session storage."""
+    serialized = {}
+    for field, data in conflicts.items():
+        serialized[field] = {
+            'existing': data['existing'] if isinstance(data['existing'], str) else str(data['existing']),
+            'new': data['new'] if isinstance(data['new'], str) else str(data['new']),
+        }
+    return serialized
+
+
+def _serialize_new_data(data):
+    """Serialize scraped data for session storage."""
+    serialized = {}
+    for key, value in data.items():
+        if isinstance(value, (str, int, float, bool, type(None))):
+            serialized[key] = value
+        elif isinstance(value, list):
+            serialized[key] = []
+            for item in value:
+                if isinstance(item, dict):
+                    serialized[key].append(item)
+                else:
+                    serialized[key].append(str(item))
+        else:
+            serialized[key] = str(value)
+    return serialized
+
+
+@login_required
+def recipe_merge_confirm(request):
+    """
+    Show merge confirmation page when scraped data conflicts with existing recipe.
+    User can choose which fields to keep (existing) or replace (new).
+    """
+    recipe_id = request.session.get('merge_recipe_id')
+    conflicts = request.session.get('merge_conflicts', {})
+    new_data = request.session.get('merge_new_data', {})
+
+    if not recipe_id or not conflicts:
+        messages.error(request, 'No merge data available.')
+        return redirect('ocr_upload')
+
+    recipe = get_object_or_404(Recipe, pk=recipe_id)
+
+    if request.method == 'POST':
+        from .models import MAX_TITLE_LENGTH, MAX_NAME_LENGTH
+
+        # Process user's choices for each conflicting field
+        updates_applied = 0
+        for field in conflicts:
+            choice = request.POST.get(f'choice_{field}', 'keep')
+            if choice == 'replace':
+                new_val = new_data.get(field, '')
+                if field == 'title' and new_val:
+                    recipe.title = str(new_val)[:MAX_TITLE_LENGTH]
+                    recipe.save()
+                    updates_applied += 1
+                elif field == 'instructions' and new_val:
+                    recipe.instructions = str(new_val)
+                    recipe.save()
+                    updates_applied += 1
+                elif field == 'ingredients' and new_val:
+                    _save_ingredients_from_text(recipe, '\n'.join(new_val) if isinstance(new_val, list) else str(new_val))
+                    updates_applied += 1
+                elif field == 'authors' and new_val:
+                    recipe.authors.clear()
+                    if isinstance(new_val, list):
+                        for name in new_val:
+                            _add_author_by_name(recipe, str(name))
+                    updates_applied += 1
+                elif field == 'genres' and new_val:
+                    recipe.genres.clear()
+                    if isinstance(new_val, list):
+                        for name in new_val:
+                            genre, _ = Genre.objects.get_or_create(
+                                name__iexact=str(name), defaults={'name': str(name)}
+                            )
+                            recipe.genres.add(genre)
+                    updates_applied += 1
+                elif field == 'source_url' and new_val:
+                    _save_source_url(recipe, str(new_val))
+                    updates_applied += 1
+
+        # Clean up session
+        for key in ['merge_recipe_id', 'merge_conflicts', 'merge_new_data']:
+            request.session.pop(key, None)
+
+        if updates_applied:
+            messages.success(request, f"Updated {updates_applied} field(s) in '{recipe.title}'.")
+        else:
+            messages.info(request, "No changes were made.")
+
+        return redirect('recipe_detail', pk=recipe.pk)
+
+    # GET: show the merge confirmation form
+    conflict_display = []
+    for field, data in conflicts.items():
+        conflict_display.append({
+            'field': field,
+            'field_label': field.replace('_', ' ').title(),
+            'existing': data.get('existing', ''),
+            'new': data.get('new', ''),
+        })
+
+    return render(request, 'RecipeDB/recipe_merge_confirm.html', {
+        'recipe': recipe,
+        'conflicts': conflict_display,
+    })
 
 
 def process_ocr_image(image_file, user, auto_search_web=False):
     """
     Process an image file using OCR to extract recipe information.
-    
+    Also detects URLs in the OCR text.
+
     Args:
         image_file: Uploaded image file
         user: User who uploaded the file
         auto_search_web: Whether to search web for additional info
-        
+
     Returns:
-        dict with 'success', 'recipe_id', 'confidence', and 'error' keys
+        dict with 'success', 'recipe_data', 'raw_text', 'confidence', and 'error' keys
     """
     try:
         # Reset file pointer to the beginning
         image_file.seek(0)
-        
+
         # Open and process the image
         image = Image.open(image_file)
-        
+
         try:
-            # Convert image to RGB if necessary (some formats may not work with Tesseract)
+            # Convert image to RGB if necessary
             if image.mode not in ('RGB', 'L'):
                 image = image.convert('RGB')
-            
+
             # Perform OCR
             text = pytesseract.image_to_string(image)
-            
+
             # Get OCR confidence data
             data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
             confidences = [float(conf) for conf in data['conf'] if conf != '-1']
@@ -656,89 +1739,40 @@ def process_ocr_image(image_file, user, auto_search_web=False):
         finally:
             # Close the PIL image to release file handles
             image.close()
-        
+
         # Determine if OCR was successful
         threshold = getattr(settings, 'OCR_CONFIDENCE_THRESHOLD', 0.7)
         success = avg_confidence >= threshold
-        
+
         if not success:
-            # Rename file with 'U' prefix for unsuccessful
             return {
                 'success': False,
                 'error': f'OCR confidence too low: {avg_confidence:.1%}',
-                'confidence': avg_confidence
+                'confidence': avg_confidence,
+                'raw_text': text,
+                'recipe_data': {},
             }
-        
+
         # Extract recipe information from text
         recipe_data = extract_recipe_from_text(text)
-        
-        if not recipe_data.get('title'):
-            return {
-                'success': False,
-                'error': 'Could not extract recipe title from image',
-                'confidence': avg_confidence
-            }
-        
-        # Truncate title to fit model field limit
-        from .models import MAX_TITLE_LENGTH, MAX_NAME_LENGTH
-        title = recipe_data['title'][:MAX_TITLE_LENGTH]
-        
-        # Create recipe
-        recipe = Recipe.objects.create(
-            title=title,
-            instructions=recipe_data.get('instructions', ''),
-            created_by=user,
-            ocr_confidence=avg_confidence,
-            source_file=image_file.name
-        )
-        
-        # Save the image
-        recipe.image.save(image_file.name, image_file, save=True)
-        
-        # Add authors if extracted
-        for author_name in recipe_data.get('authors', []):
-            author_name_truncated = author_name[:MAX_NAME_LENGTH]
-            author, _ = Author.objects.get_or_create(
-                publisher_name=author_name_truncated
-            )
-            recipe.authors.add(author)
-        
-        # Add ingredients if extracted
-        for ing_data in recipe_data.get('ingredients', []):
-            ing_name = ing_data['name'].lower()[:MAX_NAME_LENGTH]
-            ingredient, _ = Ingredient.objects.get_or_create(
-                name=ing_name
-            )
-            RecipeIngredient.objects.create(
-                recipe=recipe,
-                ingredient=ingredient,
-                quantity=ing_data.get('quantity', '')[:100],
-                order=ing_data.get('order', 0)
-            )
-        
-        # Search web for recipe URL if checkbox was checked
-        if auto_search_web and recipe_data.get('title'):
-            found_url = _search_web_for_recipe(recipe_data['title'])
-            if found_url:
-                RecipeURL.objects.create(
-                    recipe=recipe,
-                    url=found_url,
-                    description='Found via web search',
-                    is_primary=True
-                )
-        
+        recipe_data['confidence'] = avg_confidence
+        recipe_data['source_file'] = image_file.name
+
         return {
             'success': True,
-            'recipe_id': recipe.pk,
-            'confidence': avg_confidence
+            'confidence': avg_confidence,
+            'raw_text': text,
+            'recipe_data': recipe_data,
         }
-        
+
     except Exception as e:
         logger.error(f"Error processing OCR image: {e}")
         return {
             'success': False,
             'error': str(e),
-            'confidence': 0.0
+            'confidence': 0.0,
+            'raw_text': '',
+            'recipe_data': {},
         }
 
 

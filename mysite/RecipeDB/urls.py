@@ -22,6 +22,7 @@ urlpatterns = [
     
     # OCR
     path('ocr/upload/', views.ocr_upload, name='ocr_upload'),
+    path('ocr/merge/', views.recipe_merge_confirm, name='recipe_merge_confirm'),
     
     # Supporting models
     path('authors/', views.AuthorListView.as_view(), name='author_list'),
