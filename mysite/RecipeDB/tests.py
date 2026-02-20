@@ -1,4 +1,5 @@
 from django.test import TestCase, Client, override_settings
+from django.contrib import admin
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -3197,3 +3198,126 @@ class OCRUploadURLFirstFlowTest(TestCase):
         # Should use OCR data since auto_search_web is off
         recipe = Recipe.objects.get(title='OCR Title')
         self.assertIsNotNone(recipe)
+
+
+class AdminOCRConfidenceDisplayTest(TestCase):
+    """Test admin ocr_confidence_display method with format_html safety."""
+
+    def setUp(self):
+        """Set up admin and test recipe."""
+        from RecipeDB.admin import RecipeAdmin
+        self.admin = RecipeAdmin(Recipe, admin.site)
+        self.user = User.objects.create_user(
+            username='admintest', password='testpass123'
+        )
+
+    def _make_recipe(self, ocr_confidence=None):
+        """Create a recipe with specified ocr_confidence."""
+        return Recipe.objects.create(
+            title='Test Recipe',
+            instructions='Test instructions',
+            created_by=self.user,
+            ocr_confidence=ocr_confidence,
+        )
+
+    def test_none_confidence_returns_dash(self):
+        """Test that None confidence returns '-'."""
+        recipe = self._make_recipe(ocr_confidence=None)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertEqual(result, '-')
+
+    def test_high_confidence_green(self):
+        """Test high confidence (>=80%) displays green."""
+        recipe = self._make_recipe(ocr_confidence=0.95)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('green', result)
+        self.assertIn('95.0%', result)
+
+    def test_medium_confidence_orange(self):
+        """Test medium confidence (60-79%) displays orange."""
+        recipe = self._make_recipe(ocr_confidence=0.65)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('orange', result)
+        self.assertIn('65.0%', result)
+
+    def test_low_confidence_red(self):
+        """Test low confidence (<60%) displays red."""
+        recipe = self._make_recipe(ocr_confidence=0.3)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('red', result)
+        self.assertIn('30.0%', result)
+
+    def test_zero_confidence(self):
+        """Test zero confidence displays correctly."""
+        recipe = self._make_recipe(ocr_confidence=0.0)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('red', result)
+        self.assertIn('0.0%', result)
+
+    def test_full_confidence(self):
+        """Test 100% confidence displays correctly."""
+        recipe = self._make_recipe(ocr_confidence=1.0)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('green', result)
+        self.assertIn('100.0%', result)
+
+    def test_boundary_80_percent(self):
+        """Test boundary at exactly 80% is green."""
+        recipe = self._make_recipe(ocr_confidence=0.8)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('green', result)
+
+    def test_boundary_60_percent(self):
+        """Test boundary at exactly 60% is orange."""
+        recipe = self._make_recipe(ocr_confidence=0.6)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('orange', result)
+
+    def test_very_small_confidence(self):
+        """Test very small positive confidence value."""
+        recipe = self._make_recipe(ocr_confidence=0.0001)
+        result = self.admin.ocr_confidence_display(recipe)
+        self.assertIn('red', result)
+        self.assertIn('0.0%', result)
+
+    def test_format_html_does_not_raise(self):
+        """Test that format_html with pre-formatted value does not raise ValueError.
+
+        This is a regression test for the bug where {:.1f} was used directly
+        in format_html, which fails because format_html wraps args in SafeString
+        and SafeString does not support the 'f' format code.
+        """
+        for conf in [0.0, 0.1, 0.5, 0.6, 0.8, 0.95, 1.0]:
+            recipe = self._make_recipe(ocr_confidence=conf)
+            try:
+                self.admin.ocr_confidence_display(recipe)
+            except ValueError as e:
+                self.fail(
+                    f'ocr_confidence_display raised ValueError for '
+                    f'confidence={conf}: {e}'
+                )
+            recipe.delete()
+
+    def test_avg_published_rating_format_html_safe(self):
+        """Test avg_published_rating does not raise with format_html."""
+        from RecipeDB.models import PublishedRating
+        recipe = self._make_recipe(ocr_confidence=0.5)
+        PublishedRating.objects.create(recipe=recipe, source='Test', score=4)
+        try:
+            result = self.admin.avg_published_rating(recipe)
+        except ValueError as e:
+            self.fail(f'avg_published_rating raised ValueError: {e}')
+        self.assertIn('4.0', result)
+
+    def test_avg_personal_rating_format_html_safe(self):
+        """Test avg_personal_rating does not raise with format_html."""
+        from RecipeDB.models import PersonalRating
+        recipe = self._make_recipe(ocr_confidence=0.5)
+        PersonalRating.objects.create(
+            recipe=recipe, user=self.user, score=3
+        )
+        try:
+            result = self.admin.avg_personal_rating(recipe)
+        except ValueError as e:
+            self.fail(f'avg_personal_rating raised ValueError: {e}')
+        self.assertIn('3.0', result)

@@ -156,7 +156,7 @@ class RecipeAdmin(admin.ModelAdmin):
         avg = obj.get_average_published_rating()
         if avg is None:
             return '-'
-        return format_html('<strong>★ {:.1f}</strong>', avg)
+        return format_html('<strong>★ {}</strong>', f'{avg:.1f}')
     avg_published_rating.short_description = 'Published'
     
     def avg_personal_rating(self, obj):
@@ -164,7 +164,7 @@ class RecipeAdmin(admin.ModelAdmin):
         avg = obj.get_average_personal_rating()
         if avg is None:
             return '-'
-        return format_html('<strong>★ {:.1f}</strong>', avg)
+        return format_html('<strong>★ {}</strong>', f'{avg:.1f}')
     avg_personal_rating.short_description = 'Community'
     
     def ocr_confidence_display(self, obj):
@@ -180,9 +180,10 @@ class RecipeAdmin(admin.ModelAdmin):
         else:
             color = 'red'
         
+        formatted_value = f'{percentage:.1f}%'
         return format_html(
-            '<span style="color: {}; font-weight: bold;">{:.1f}%</span>',
-            color, percentage
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color, formatted_value
         )
     ocr_confidence_display.short_description = 'OCR Conf.'
     

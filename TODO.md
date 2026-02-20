@@ -24,6 +24,7 @@
 - [x] ~~Multi-line title combining with unmatched parenthesis detection~~
 - [x] ~~Known recipe site detection from OCR branding text (Food & Wine, Allrecipes, Bon Appétit, etc.)~~
 - [x] ~~Site-specific recipe search: search on detected site and slug-based URL guessing~~
+- [x] ~~Fix admin format_html ValueError: pre-format floats before passing to format_html (ocr_confidence_display, avg_published_rating, avg_personal_rating)~~
 - [ ] Add support for handwritten recipe recognition
 - [ ] Implement batch OCR processing for multiple images
 - [ ] Add OCR language selection (currently English only)
@@ -85,6 +86,7 @@
 - [x] ~~Increase test coverage with URL scraping, merge, and OCR URL detection tests (235 tests)~~
 - [x] ~~Added noise filtering tests, site detection tests, slug generation tests (284 tests)~~
 - [x] ~~Verified 284 tests pass after inline CSS refactoring~~
+- [x] ~~Added admin display tests (ocr_confidence_display, avg_published_rating, avg_personal_rating) — 12 new tests (296 total)~~
 - [ ] Increase test coverage to >90%
 - [ ] Add integration tests for OCR workflow
 - [ ] Implement end-to-end testing with Selenium

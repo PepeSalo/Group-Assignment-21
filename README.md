@@ -88,6 +88,7 @@ RecipeDB is a comprehensive web application built with Django 6.0.2 that allows 
 - **Advanced Filtering**: Filter recipes by author, genre, date, and OCR confidence
 - **Search Functionality**: Quick search across all relevant fields
 - **Visual Indicators**: Color-coded OCR confidence scores and rating displays
+- **Safe HTML Formatting**: All admin display methods pre-format numeric values before passing to `format_html`, avoiding `SafeString` format code errors
 
 ## Installation
 
